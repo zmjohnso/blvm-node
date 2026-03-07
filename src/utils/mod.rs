@@ -20,7 +20,7 @@ pub use async_helpers::{collect_results, delay_before, ignore_error, with_timeou
 pub use circuit_breaker::{CircuitBreaker, CircuitState};
 pub use env::{env_bool, env_int, env_opt, env_or_default, env_or_else};
 pub use error::{
-    err_option_to_result, log_error, log_error_async, result_to_option, with_default,
+    err_option_to_result, log_error, log_error_async, recover_lock, result_to_option, with_default,
     with_default_async, with_fallback, with_fallback_async,
 };
 pub use lock::{try_with_lock_timeout, with_lock, with_read_lock, with_write_lock};

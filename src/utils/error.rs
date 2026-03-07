@@ -182,3 +182,77 @@ where
         }
     }
 }
+
+/// Recover from a poisoned `RwLock` or `Mutex` without panicking.
+///
+/// When a thread panics while holding a lock, Rust marks it as "poisoned".
+/// Subsequent callers get a `PoisonError` rather than the lock guard.
+/// This helper logs a warning with a recovery suggestion and returns the
+/// last known value inside the lock, which is usually safe to use.
+///
+/// # Example
+/// ```rust,ignore
+/// use std::sync::RwLock;
+///
+/// let lock = RwLock::new(0u32);
+/// let guard = recover_lock(lock.read(), "fee cache read");
+/// ```
+pub fn recover_lock<T>(
+    result: std::sync::LockResult<T>,
+    context: &str,
+) -> T {
+    result.unwrap_or_else(|poisoned| {
+        warn!(
+            "{}: lock was poisoned (a thread panicked while holding it). \
+             Recovering with last known value. \
+             Suggestion: check logs for earlier panics in this subsystem \
+             and consider restarting the node if data inconsistency is suspected.",
+            context
+        );
+        poisoned.into_inner()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, RwLock};
+
+    #[test]
+    fn test_recover_lock_returns_value_on_success() {
+        let lock = RwLock::new(42u32);
+        let guard = recover_lock(lock.read(), "test lock");
+        assert_eq!(*guard, 42);
+    }
+
+    #[test]
+    fn test_recover_lock_recovers_from_poisoned_read_lock() {
+        let lock = Arc::new(RwLock::new(99u32));
+        let lock_clone = lock.clone();
+
+        // Poison the lock by panicking while holding a write guard
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = lock_clone.write().unwrap();
+            panic!("intentional poison for test");
+        });
+
+        // Must not panic — should return last known value with a warning
+        let guard = recover_lock(lock.read(), "test poisoned read lock");
+        assert_eq!(*guard, 99);
+    }
+
+    #[test]
+    fn test_recover_lock_write_recovers_from_poisoned_lock() {
+        let lock = Arc::new(RwLock::new(7u32));
+        let lock_clone = lock.clone();
+
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = lock_clone.write().unwrap();
+            panic!("intentional poison for test");
+        });
+
+        let mut guard = recover_lock(lock.write(), "test poisoned write lock");
+        *guard = 42;
+        assert_eq!(*guard, 42);
+    }
+}
