@@ -120,19 +120,22 @@ impl MempoolManager {
     /// Set event publisher for mempool events
     /// Uses interior mutability so it can be called even when MempoolManager is in an Arc
     pub fn set_event_publisher(&self, event_publisher: Option<Arc<EventPublisher>>) {
-        *self.event_publisher.write().unwrap() = event_publisher;
+        *crate::utils::recover_lock(self.event_publisher.write(), "mempool event_publisher write") =
+            event_publisher;
     }
 
     /// Set RBF configuration
     /// Uses interior mutability so it can be called even when MempoolManager is in an Arc
     pub fn set_rbf_config(&self, rbf_config: Option<RbfConfig>) {
-        *self.rbf_config.write().unwrap() = rbf_config;
+        *crate::utils::recover_lock(self.rbf_config.write(), "mempool rbf_config write") =
+            rbf_config;
     }
 
     /// Set mempool policy configuration
     /// Uses interior mutability so it can be called even when MempoolManager is in an Arc
     pub fn set_policy_config(&self, policy_config: Option<MempoolPolicyConfig>) {
-        *self.policy_config.write().unwrap() = policy_config;
+        *crate::utils::recover_lock(self.policy_config.write(), "mempool policy_config write") =
+            policy_config;
     }
 
     /// Get current timestamp (Unix seconds)
@@ -207,7 +210,7 @@ impl MempoolManager {
     async fn cleanup_old_transactions(&mut self) -> Result<()> {
         // Remove transactions that are too old
         let expiry_time = {
-            if let Some(ref policy) = *self.policy_config.read().unwrap() {
+            if let Some(ref policy) = *crate::utils::recover_lock(self.policy_config.read(), "mempool policy_config read") {
                 policy.mempool_expiry_hours * 3600
             } else {
                 // No policy config, skip expiry check
@@ -221,7 +224,7 @@ impl MempoolManager {
         let mut to_remove = Vec::with_capacity(estimated_removals);
 
         {
-            let timestamps = self.tx_timestamps.read().unwrap();
+            let timestamps = crate::utils::recover_lock(self.tx_timestamps.read(), "mempool tx_timestamps read");
             for (hash, timestamp) in timestamps.iter() {
                 if current_time.saturating_sub(*timestamp) > expiry_time {
                     to_remove.push(*hash);
@@ -242,7 +245,7 @@ impl MempoolManager {
 
     /// Enforce mempool size limits by evicting transactions if necessary
     async fn enforce_mempool_limits(&mut self) -> Result<()> {
-        let policy = match self.policy_config.read().unwrap().as_ref() {
+        let policy = match crate::utils::recover_lock(self.policy_config.read(), "mempool policy_config read").as_ref() {
             Some(p) => p.clone(),
             None => return Ok(()), // No policy config, no limits
         };
@@ -351,7 +354,7 @@ impl MempoolManager {
 
             // Don't evict if it has descendants (would orphan them)
             let has_descendants = {
-                let descendants = self.tx_descendants.read().unwrap();
+                let descendants = crate::utils::recover_lock(self.tx_descendants.read(), "mempool tx_descendants read");
                 descendants
                     .get(&hash)
                     .map(|d| !d.is_empty())
@@ -379,7 +382,7 @@ impl MempoolManager {
 
         // Get all transactions with timestamps, sorted by age (oldest first)
         let mut tx_ages: Vec<(Hash, u64, usize)> = {
-            let timestamps = self.tx_timestamps.read().unwrap();
+            let timestamps = crate::utils::recover_lock(self.tx_timestamps.read(), "mempool tx_timestamps read");
             self.transactions
                 .iter()
                 .filter_map(|(hash, tx)| {
@@ -405,7 +408,7 @@ impl MempoolManager {
 
             // Don't evict if it has descendants
             let has_descendants = {
-                let descendants = self.tx_descendants.read().unwrap();
+                let descendants = crate::utils::recover_lock(self.tx_descendants.read(), "mempool tx_descendants read");
                 descendants
                     .get(&hash)
                     .map(|d| !d.is_empty())
@@ -455,7 +458,7 @@ impl MempoolManager {
 
             // Don't evict if it has descendants
             let has_descendants = {
-                let descendants = self.tx_descendants.read().unwrap();
+                let descendants = crate::utils::recover_lock(self.tx_descendants.read(), "mempool tx_descendants read");
                 descendants
                     .get(&hash)
                     .map(|d| !d.is_empty())
@@ -487,8 +490,8 @@ impl MempoolManager {
 
         // Get all transactions with no descendants, sorted by fee rate (lowest first)
         let mut tx_no_descendants: Vec<(Hash, u64, usize)> = {
-            let descendants = self.tx_descendants.read().unwrap();
-            let fee_cache = self.fee_cache.read().unwrap();
+            let descendants = crate::utils::recover_lock(self.tx_descendants.read(), "mempool tx_descendants read");
+            let fee_cache = crate::utils::recover_lock(self.fee_cache.read(), "mempool fee_cache read");
 
             self.transactions
                 .iter()
@@ -540,8 +543,8 @@ impl MempoolManager {
         // Calculate score: lower fee rate + older age = higher eviction priority
         let current_time = Self::current_timestamp();
         let mut tx_scores: Vec<(Hash, u64, usize)> = {
-            let timestamps = self.tx_timestamps.read().unwrap();
-            let fee_cache = self.fee_cache.read().unwrap();
+            let timestamps = crate::utils::recover_lock(self.tx_timestamps.read(), "mempool tx_timestamps read");
+            let fee_cache = crate::utils::recover_lock(self.fee_cache.read(), "mempool fee_cache read");
 
             self.transactions
                 .iter()
@@ -587,7 +590,7 @@ impl MempoolManager {
 
             // Don't evict if it has descendants
             let has_descendants = {
-                let descendants = self.tx_descendants.read().unwrap();
+                let descendants = crate::utils::recover_lock(self.tx_descendants.read(), "mempool tx_descendants read");
                 descendants
                     .get(&hash)
                     .map(|d| !d.is_empty())
@@ -622,7 +625,7 @@ impl MempoolManager {
         let mut spam_txs: Vec<(Hash, u64, usize)> = Vec::new();
         let mut non_spam_txs: Vec<(Hash, u64, usize)> = Vec::new();
 
-        let fee_cache = self.fee_cache.read().unwrap();
+        let fee_cache = crate::utils::recover_lock(self.fee_cache.read(), "mempool fee_cache read");
         for (hash, tx) in &self.transactions {
             let size = serialize_transaction(tx).len();
             let fee_rate = fee_cache.get(hash).copied().unwrap_or(0);
@@ -655,7 +658,7 @@ impl MempoolManager {
 
             // Don't evict if it has descendants
             let has_descendants = {
-                let descendants = self.tx_descendants.read().unwrap();
+                let descendants = crate::utils::recover_lock(self.tx_descendants.read(), "mempool tx_descendants read");
                 descendants
                     .get(&hash)
                     .map(|d| !d.is_empty())
@@ -678,7 +681,7 @@ impl MempoolManager {
 
             // Don't evict if it has descendants
             let has_descendants = {
-                let descendants = self.tx_descendants.read().unwrap();
+                let descendants = crate::utils::recover_lock(self.tx_descendants.read(), "mempool tx_descendants read");
                 descendants
                     .get(&hash)
                     .map(|d| !d.is_empty())
@@ -710,7 +713,7 @@ impl MempoolManager {
     ) -> Result<bool> {
         use blvm_protocol::block::calculate_tx_id;
 
-        let rbf_config = match self.rbf_config.read().unwrap().as_ref() {
+        let rbf_config = match crate::utils::recover_lock(self.rbf_config.read(), "mempool rbf_config read").as_ref() {
             Some(config) => config.clone(),
             None => {
                 // No RBF config - use default BIP125 behavior
@@ -736,7 +739,7 @@ impl MempoolManager {
         let _new_tx_hash = calculate_tx_id(new_tx);
 
         // Check replacement count limit
-        if let Some(tracking) = self.rbf_tracking.read().unwrap().get(&existing_tx_hash) {
+        if let Some(tracking) = crate::utils::recover_lock(self.rbf_tracking.read(), "mempool rbf_tracking read").get(&existing_tx_hash) {
             if tracking.replacement_count >= rbf_config.max_replacements_per_tx {
                 warn!(
                     "RBF replacement rejected: max replacements ({}) exceeded for tx {}",
@@ -1018,8 +1021,8 @@ impl MempoolManager {
 
     /// Update dependency graph when a transaction is added
     fn update_dependency_graph(&self, tx: &Transaction, tx_hash: &Hash) {
-        let mut dependencies = self.tx_dependencies.write().unwrap();
-        let mut descendants = self.tx_descendants.write().unwrap();
+        let mut dependencies = crate::utils::recover_lock(self.tx_dependencies.write(), "mempool tx_dependencies write");
+        let mut descendants = crate::utils::recover_lock(self.tx_descendants.write(), "mempool tx_descendants write");
 
         // Initialize empty sets for this transaction
         dependencies.entry(*tx_hash).or_default();
@@ -1087,7 +1090,7 @@ impl MempoolManager {
 
                     // Update RBF tracking
                     let original_hash = {
-                        let tracking = self.rbf_tracking.read().unwrap();
+                        let tracking = crate::utils::recover_lock(self.rbf_tracking.read(), "mempool rbf_tracking read");
                         tracking
                             .get(&existing_hash)
                             .map(|t| t.original_tx_hash)
@@ -1095,7 +1098,7 @@ impl MempoolManager {
                     };
 
                     let replacement_count = {
-                        let tracking = self.rbf_tracking.read().unwrap();
+                        let tracking = crate::utils::recover_lock(self.rbf_tracking.read(), "mempool rbf_tracking read");
                         tracking
                             .get(&existing_hash)
                             .map(|t| t.replacement_count + 1)
@@ -1103,7 +1106,7 @@ impl MempoolManager {
                     };
 
                     {
-                        let mut tracking = self.rbf_tracking.write().unwrap();
+                        let mut tracking = crate::utils::recover_lock(self.rbf_tracking.write(), "mempool rbf_tracking write");
                         tracking.insert(
                             tx_hash,
                             RbfTracking {
@@ -1130,7 +1133,7 @@ impl MempoolManager {
         }
 
         // Check ancestor/descendant limits before adding
-        if let Some(ref policy) = *self.policy_config.read().unwrap() {
+        if let Some(ref policy) = *crate::utils::recover_lock(self.policy_config.read(), "mempool policy_config read") {
             if !self.check_ancestor_descendant_limits(&tx, &tx_hash, policy)? {
                 warn!(
                     "Transaction {} rejected: exceeds ancestor/descendant limits",
@@ -1161,7 +1164,7 @@ impl MempoolManager {
         // Calculate and cache fee rate (will be updated when UTXO set is available)
         // For now, set to 0 - will be recalculated in get_prioritized_transactions
         let fee_rate = 0u64;
-        self.fee_cache.write().unwrap().insert(tx_hash, fee_rate);
+        crate::utils::recover_lock(self.fee_cache.write(), "mempool fee_cache write").insert(tx_hash, fee_rate);
         self.fee_index
             .write()
             .unwrap()
@@ -1170,7 +1173,7 @@ impl MempoolManager {
             .push(tx_hash);
 
         // Publish mempool transaction added event
-        if let Some(ref event_pub) = *self.event_publisher.read().unwrap() {
+        if let Some(ref event_pub) = *crate::utils::recover_lock(self.event_publisher.read(), "mempool event_publisher read") {
             let mempool_size = self.transactions.len();
             // Convert fee_rate from u64 to f64 (satoshis per vbyte)
             // Note: fee_rate is currently 0, will be updated later when UTXO set is available
@@ -1225,7 +1228,7 @@ impl MempoolManager {
 
         // Use sorted index to get top N transactions (already sorted by fee rate descending)
         let mut result = Vec::with_capacity(limit);
-        let fee_index = self.fee_index.read().unwrap();
+        let fee_index = crate::utils::recover_lock(self.fee_index.read(), "mempool fee_index read");
         for (Reverse(_fee_rate), tx_hashes) in fee_index.iter() {
             for tx_hash in tx_hashes {
                 if let Some(tx) = self.transactions.get(tx_hash) {
@@ -1274,7 +1277,7 @@ impl MempoolManager {
         let current_hash = Self::calculate_utxo_set_hash(utxo_set);
 
         // Check if UTXO set changed
-        let mut last_hash = self.utxo_set_hash.write().unwrap();
+        let mut last_hash = crate::utils::recover_lock(self.utxo_set_hash.write(), "mempool utxo_set_hash write");
         if Some(current_hash) == *last_hash {
             // UTXO set unchanged - skip recalculation
             drop(last_hash);
@@ -1286,11 +1289,11 @@ impl MempoolManager {
         drop(last_hash);
 
         // Clear existing index (we'll rebuild it)
-        let mut fee_index = self.fee_index.write().unwrap();
+        let mut fee_index = crate::utils::recover_lock(self.fee_index.write(), "mempool fee_index write");
         fee_index.clear();
         drop(fee_index);
 
-        let mut fee_cache = self.fee_cache.write().unwrap();
+        let mut fee_cache = crate::utils::recover_lock(self.fee_cache.write(), "mempool fee_cache write");
         fee_cache.clear();
 
         // Optimization: Pre-collect all prevouts from all transactions for batch UTXO lookup
@@ -1338,7 +1341,7 @@ impl MempoolManager {
             fee_cache.insert(*tx_hash, fee_rate);
 
             // Add to sorted index
-            let mut fee_index = self.fee_index.write().unwrap();
+            let mut fee_index = crate::utils::recover_lock(self.fee_index.write(), "mempool fee_index write");
             fee_index
                 .entry(Reverse(fee_rate))
                 .or_default()
@@ -1406,8 +1409,8 @@ impl MempoolManager {
             }
 
             // Remove from fee index
-            if let Some(fee_rate) = self.fee_cache.write().unwrap().remove(hash) {
-                let mut fee_index = self.fee_index.write().unwrap();
+            if let Some(fee_rate) = crate::utils::recover_lock(self.fee_cache.write(), "mempool fee_cache write").remove(hash) {
+                let mut fee_index = crate::utils::recover_lock(self.fee_index.write(), "mempool fee_index write");
                 if let Some(tx_hashes) = fee_index.get_mut(&Reverse(fee_rate)) {
                     tx_hashes.retain(|&h| h != *hash);
                     if tx_hashes.is_empty() {
@@ -1417,15 +1420,15 @@ impl MempoolManager {
             }
 
             // Remove RBF tracking
-            self.rbf_tracking.write().unwrap().remove(hash);
+            crate::utils::recover_lock(self.rbf_tracking.write(), "mempool rbf_tracking write").remove(hash);
 
             // Remove timestamp
-            self.tx_timestamps.write().unwrap().remove(hash);
+            crate::utils::recover_lock(self.tx_timestamps.write(), "mempool tx_timestamps write").remove(hash);
 
             // Remove from dependency graph
             {
-                let mut dependencies = self.tx_dependencies.write().unwrap();
-                let mut descendants = self.tx_descendants.write().unwrap();
+                let mut dependencies = crate::utils::recover_lock(self.tx_dependencies.write(), "mempool tx_dependencies write");
+                let mut descendants = crate::utils::recover_lock(self.tx_descendants.write(), "mempool tx_descendants write");
 
                 // Remove this transaction from all its descendants' dependency lists
                 if let Some(children) = descendants.remove(hash) {
@@ -1447,7 +1450,7 @@ impl MempoolManager {
             }
 
             // Publish mempool transaction removed event
-            if let Some(ref event_pub) = *self.event_publisher.read().unwrap() {
+            if let Some(ref event_pub) = *crate::utils::recover_lock(self.event_publisher.read(), "mempool event_publisher read") {
                 let mempool_size = self.transactions.len();
                 let hash_clone = *hash;
                 let reason = "removed".to_string(); // Could be more specific: "confirmed", "expired", "replaced", "rejected"
@@ -1471,13 +1474,13 @@ impl MempoolManager {
         self.transactions.clear();
         self.mempool.clear();
         self.spent_outputs.clear();
-        self.fee_index.write().unwrap().clear();
-        self.fee_cache.write().unwrap().clear();
-        self.rbf_tracking.write().unwrap().clear();
-        self.tx_timestamps.write().unwrap().clear();
+        crate::utils::recover_lock(self.fee_index.write(), "mempool fee_index write").clear();
+        crate::utils::recover_lock(self.fee_cache.write(), "mempool fee_cache write").clear();
+        crate::utils::recover_lock(self.rbf_tracking.write(), "mempool rbf_tracking write").clear();
+        crate::utils::recover_lock(self.tx_timestamps.write(), "mempool tx_timestamps write").clear();
 
         // Publish mempool cleared event
-        if let Some(ref event_pub) = *self.event_publisher.read().unwrap() {
+        if let Some(ref event_pub) = *crate::utils::recover_lock(self.event_publisher.read(), "mempool event_publisher read") {
             let event_pub_clone = Arc::clone(event_pub);
             let cleared_count_clone = cleared_count;
             tokio::spawn(async move {
@@ -1578,5 +1581,37 @@ impl MempoolManager {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_set_rbf_config_does_not_panic_on_poisoned_lock() {
+        let manager = Arc::new(MempoolManager::new());
+        let m = manager.clone();
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = m.rbf_config.write().unwrap();
+            panic!("poison for test");
+        }));
+
+        // Must not panic — setter should recover gracefully
+        manager.set_rbf_config(None);
+    }
+
+    #[test]
+    fn test_set_policy_config_does_not_panic_on_poisoned_lock() {
+        let manager = Arc::new(MempoolManager::new());
+        let m = manager.clone();
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = m.policy_config.write().unwrap();
+            panic!("poison for test");
+        }));
+
+        manager.set_policy_config(None);
     }
 }
