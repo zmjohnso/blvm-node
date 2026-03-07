@@ -297,3 +297,4 @@ required-features = ["rocksdb"]
 # By patching to our custom fork, we use a newer secp256k1-sys that's compatible with newer cc
 [patch.crates-io]
 secp256k1 = { git = "https://github.com/secsovereign/rust-secp256k1.git", branch = "batch-schnorr-verification" }
+blvm-spec-lock = { path = "../blvm-spec-lock" }

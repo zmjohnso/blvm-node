@@ -462,7 +462,7 @@ impl Node {
                 let blockstore = Arc::clone(&self.storage.blocks());
                 let storage_arc = Arc::clone(&self.storage);
                 let protocol_arc = Arc::clone(&self.protocol);
-                let mut utxo_set = blvm_protocol::UtxoSet::new();
+                let mut utxo_set = blvm_protocol::UtxoSet::default();
                 
                 info!("[START_COMPONENTS] Calling sync_coordinator.start_parallel_ibd()...");
                 match self.sync_coordinator.start_parallel_ibd(
@@ -1037,7 +1037,7 @@ impl Node {
 
         // Get initial state for block processing
         let mut current_height = self.storage.chain().get_height()?.unwrap_or(0);
-        let mut utxo_set = blvm_protocol::UtxoSet::new();
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
 
         // Main node loop - coordinates between all components and handles shutdown signals
         loop {

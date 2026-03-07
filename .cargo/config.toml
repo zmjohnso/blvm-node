@@ -1,1 +1,1 @@
-paths = ["../blvm-consensus", "../blvm-protocol"]
+paths = ["../blvm-consensus", "../blvm-protocol", "../blvm-spec-lock"]

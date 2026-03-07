@@ -32,7 +32,7 @@ fn main() -> anyhow::Result<()> {
     println!();
 
     let txid = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
-    let raw_tx = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff...";
+    let raw_tx ="01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff...";
 
     // Example 1: Get mempool info
     println!("1. getmempoolinfo - Get overall mempool stats");

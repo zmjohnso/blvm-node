@@ -241,6 +241,7 @@ impl ProcessSandbox {
                             use nix::sys::resource::{setrlimit, Resource};
                             let soft_limit = max_children as u64;
                             let hard_limit = max_children as u64;
+                            #[cfg(any(target_os = "linux", target_os = "android"))]
                             setrlimit(Resource::RLIMIT_NPROC, soft_limit, hard_limit).map_err(
                                 |e| {
                                     ModuleError::OperationError(format!(
