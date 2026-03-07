@@ -2152,6 +2152,27 @@ impl ParallelIBD {
 
     /// Flush pending blocks to storage using batch writes
     ///
+    /// Serialize a block for the UTXO prefetch cache.
+    ///
+    /// Returns `Err` with context if serialization fails, instead of panicking.
+    /// Serialization should never fail for well-formed blocks, but returning
+    /// `Result` ensures the IBD pipeline degrades gracefully rather than crashing.
+    fn serialize_block_for_prefetch_cache(block: &Block) -> anyhow::Result<Vec<u8>> {
+        bincode::serialize(block).context(
+            "failed to serialize block for UTXO prefetch cache; \
+             suggestion: ensure block data is well-formed. If this error persists, \
+             try restarting IBD from scratch with a cleared data directory.",
+        )
+    }
+
+    /// Serialize a block header for the prefetch cache.
+    fn serialize_header_for_prefetch_cache(header: &BlockHeader) -> anyhow::Result<Vec<u8>> {
+        bincode::serialize(header).context(
+            "failed to serialize block header for prefetch cache; \
+             suggestion: check for data corruption in received headers.",
+        )
+    }
+
     /// This commits multiple blocks in a single database transaction,
     /// which is much faster than individual writes.
     fn flush_pending_blocks(
@@ -2179,7 +2200,7 @@ impl ParallelIBD {
 
                 // Parallel serialize all block data
                 let block_data: Vec<Vec<u8>> = pending.par_iter()
-                    .map(|(block, _, _)| bincode::serialize(block).unwrap())
+                    .filter_map(|(block, _, _)| Self::serialize_block_for_prefetch_cache(block).ok())
                     .collect();
 
                 // Parallel serialize all header data (with caching)
@@ -2193,7 +2214,13 @@ impl ParallelIBD {
                         }
                         
                         // Cache miss - serialize
-                        let serialized = bincode::serialize(&block.header).unwrap();
+                        let serialized = match Self::serialize_header_for_prefetch_cache(&block.header) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                tracing::warn!("{e}");
+                                return Vec::new();
+                            }
+                        };
                         
                         // Cache it
                         cache_serialized_header(*block_hash, serialized.clone());
@@ -2213,7 +2240,7 @@ impl ParallelIBD {
 
                 // Pre-serialize all block data
                 let block_data: Vec<Vec<u8>> = pending.iter()
-                    .map(|(block, _, _)| bincode::serialize(block).unwrap())
+                    .filter_map(|(block, _, _)| Self::serialize_block_for_prefetch_cache(block).ok())
                     .collect();
 
                 // Pre-serialize all header data (with caching)
@@ -2227,7 +2254,13 @@ impl ParallelIBD {
                         }
                         
                         // Cache miss - serialize
-                        let serialized = bincode::serialize(&block.header).unwrap();
+                        let serialized = match Self::serialize_header_for_prefetch_cache(&block.header) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                tracing::warn!("{e}");
+                                return Vec::new();
+                            }
+                        };
                         
                         // Cache it
                         cache_serialized_header(*block_hash, serialized.clone());
@@ -2646,6 +2679,38 @@ mod tests {
         // Should pipeline multiple requests per peer
         assert!(config.max_concurrent_per_peer >= 8, "Need more pipelining for throughput");
         assert!(config.max_concurrent_per_peer <= 256, "Too much pipelining may overwhelm peers");
+    }
+
+    #[test]
+    fn test_serialize_block_for_prefetch_cache_returns_result() {
+        // A valid block should serialize successfully without panicking
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [0u8; 32],
+                timestamp: 0,
+                bits: 0,
+                nonce: 0,
+            },
+            transactions: Box::new([]),
+        };
+        let result = ParallelIBD::serialize_block_for_prefetch_cache(&block);
+        assert!(result.is_ok(), "Valid block should serialize without error");
+    }
+
+    #[test]
+    fn test_serialize_header_for_prefetch_cache_returns_result() {
+        let header = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [0u8; 32],
+            timestamp: 0,
+            bits: 0,
+            nonce: 0,
+        };
+        let result = ParallelIBD::serialize_header_for_prefetch_cache(&header);
+        assert!(result.is_ok(), "Valid block header should serialize without error");
     }
 }
 
