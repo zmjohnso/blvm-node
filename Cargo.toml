@@ -24,7 +24,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 blvm-protocol = { version = ">=0.1, <1" }
 blvm-consensus = { version = ">=0.1, <1", optional = true }
 blvm-spec-lock = { version = ">=0.1, <1", optional = true, default-features = false }
-blvm-muhash = { version = ">=0.1, <1" }
+# Running-state serialization (serialize_running_state / MUHASH_RUNNING_STATE_BYTES) requires >=0.1.6.
+blvm-muhash = { version = ">=0.1.6, <1" }
 
 # Storage layer - EXACT VERSIONS for security
 sled = { version = "=0.34.7", optional = true }
