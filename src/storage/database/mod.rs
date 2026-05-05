@@ -1487,7 +1487,13 @@ pub mod rocksdb_impl {
                 // Previous trigger of 64 caused a single 6.1 GB compaction burst (64 × 96 MB SSTs
                 // merged simultaneously), spiking RSS by 3.4 GB at h=254k and triggering swap.
                 // 16 files → each compaction uses ~200 MB of merge-sort RAM, no spike.
-                let l0_trigger = if total_ram_gb >= 32 { 64 } else if total_ram_gb >= 16 { 16 } else { 8 };
+                let l0_trigger = if total_ram_gb >= 32 {
+                    64
+                } else if total_ram_gb >= 16 {
+                    16
+                } else {
+                    8
+                };
                 o.set_level_zero_file_num_compaction_trigger(l0_trigger);
                 // Scale slowdown/stop triggers proportionally to the new compact trigger.
                 o.set_level_zero_slowdown_writes_trigger(l0_trigger * 4);

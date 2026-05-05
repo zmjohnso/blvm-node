@@ -169,7 +169,10 @@ mod ibd_autorepair_tests {
     fn reconcile_resets_watermark_when_ibd_utxos_empty() {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(dir.path()).unwrap();
-        storage.chain().force_set_ibd_utxo_watermark(418_000).unwrap();
+        storage
+            .chain()
+            .force_set_ibd_utxo_watermark(418_000)
+            .unwrap();
         assert_eq!(
             reconcile_ibd_utxo_watermark_with_disk(&storage, 418_000).unwrap(),
             0
@@ -182,7 +185,11 @@ mod ibd_autorepair_tests {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(dir.path()).unwrap();
         storage.chain().force_set_ibd_utxo_watermark(100).unwrap();
-        storage.open_tree("ibd_utxos").unwrap().insert(b"k", b"v").unwrap();
+        storage
+            .open_tree("ibd_utxos")
+            .unwrap()
+            .insert(b"k", b"v")
+            .unwrap();
         assert_eq!(
             reconcile_ibd_utxo_watermark_with_disk(&storage, 100).unwrap(),
             100

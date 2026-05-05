@@ -14,13 +14,13 @@
 //! Every change in [`PressureLevel`] (including back to `None`) is logged once via
 //! `pressure_level_reported` / `should_flush` (`MemoryGuard: pressure transition From -> To`).
 
+#[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
+use libmimalloc_sys;
 #[cfg(target_os = "linux")]
 use std::io::Read;
 use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-#[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
-use libmimalloc_sys;
 
 /// Memory pressure severity. Higher levels trigger more aggressive responses
 /// in the validation loop. Ordered so `>=` comparisons work naturally.
@@ -453,8 +453,7 @@ impl MemoryGuard {
         // L0-SST accumulation on constrained hosts.
         let utxo_flush_threshold = {
             const BYTES_PER_OP: usize = 160;
-            let target =
-                (spare_mb as usize).saturating_mul(1024 * 1024) * 6 / 100 / BYTES_PER_OP;
+            let target = (spare_mb as usize).saturating_mul(1024 * 1024) * 6 / 100 / BYTES_PER_OP;
             let max_ops: usize = if total_gb >= 48 {
                 2_000_000
             } else if total_gb >= 32 {
@@ -555,7 +554,11 @@ impl MemoryGuard {
         };
 
         // Feeder buffer byte cap — tighter on 16GB to avoid holding too many ~1MB blocks.
-        let feeder_pct = if total_mb <= Self::EXTENDED_SIXTEEN_CLASS_MB { 2 } else { 5 };
+        let feeder_pct = if total_mb <= Self::EXTENDED_SIXTEEN_CLASS_MB {
+            2
+        } else {
+            5
+        };
         let feeder_buffer_bytes_limit = (budget_mb * feeder_pct / 100 * 1024 * 1024) as usize;
 
         // Flush concurrency: each std::thread::spawn takes ~8MB stack + RocksDB WriteBatch
@@ -700,10 +703,7 @@ impl MemoryGuard {
     /// Pure-function variant — lets the dispatcher capture `storage_flush_interval` once and
     /// avoid acquiring `mem_mtx` on the per-block hot path.
     #[inline]
-    pub(crate) fn storage_flush_interval_live_for(
-        base: usize,
-        pressure: PressureLevel,
-    ) -> usize {
+    pub(crate) fn storage_flush_interval_live_for(base: usize, pressure: PressureLevel) -> usize {
         match pressure {
             PressureLevel::None => base,
             PressureLevel::Elevated => (base * 3 / 4).max(200),
@@ -734,10 +734,7 @@ impl MemoryGuard {
             PressureLevel::Critical => 6,
             PressureLevel::Emergency => 4,
         };
-        let raw = budget_mb
-            .saturating_mul(1024 * 1024)
-            .saturating_mul(pct)
-            / 100;
+        let raw = budget_mb.saturating_mul(1024 * 1024).saturating_mul(pct) / 100;
         Some(raw.max(32 * 1024 * 1024))
     }
 
@@ -882,40 +879,37 @@ impl MemoryGuard {
             // causing 67k false Critical events per IBD run. VmSwap is exactly what we need:
             // it is non-zero only when our pages are actually on disk.
             let our_swap = snap.vm_swap_mb > 256; // >256MB of OUR pages are in swap
-            let crit_rss = self.crit_rss_threshold_mb;          // default = t*22/100
-            let rss_elev  = (t * 30 / 100).max(2000);           // e.g. 4776 MB on 16 GiB
-            let rss_emerg = (t * 50 / 100).max(4000);           // e.g. 8192 MB on 16 GiB
-            // Hysteresis on avail thresholds: enter at A_up, require A_up + 512 MB to deactivate
-            // the swap_X flag (and thus permit downward transitions). The 512 MB gap absorbs the
-            // observed sys_avail swing (3015–3555 MB at h=315k = 540 MB swing under steady IBD
-            // load). Without this gap, sys_avail oscillating ±300 MB around the entry boundary
-            // caused 24+ Elevated↔Critical transitions per minute, each one running
-            // `adjust_max_ahead_live` and clobbering the prefetch lookahead.
-            let swap_elev_up  = swap_used >= t * 5 / 100  && a > 0 && a < 4096 && our_swap;
-            let swap_crit_up  = swap_used >= t * 12 / 100 && a > 0 && a < 3072 && our_swap;
+            let crit_rss = self.crit_rss_threshold_mb; // default = t*22/100
+            let rss_elev = (t * 30 / 100).max(2000); // e.g. 4776 MB on 16 GiB
+            let rss_emerg = (t * 50 / 100).max(4000); // e.g. 8192 MB on 16 GiB
+                                                      // Hysteresis on avail thresholds: enter at A_up, require A_up + 512 MB to deactivate
+                                                      // the swap_X flag (and thus permit downward transitions). The 512 MB gap absorbs the
+                                                      // observed sys_avail swing (3015–3555 MB at h=315k = 540 MB swing under steady IBD
+                                                      // load). Without this gap, sys_avail oscillating ±300 MB around the entry boundary
+                                                      // caused 24+ Elevated↔Critical transitions per minute, each one running
+                                                      // `adjust_max_ahead_live` and clobbering the prefetch lookahead.
+            let swap_elev_up = swap_used >= t * 5 / 100 && a > 0 && a < 4096 && our_swap;
+            let swap_crit_up = swap_used >= t * 12 / 100 && a > 0 && a < 3072 && our_swap;
             let swap_emerg_up = swap_used >= t * 20 / 100 && a > 0 && a < 2048 && our_swap;
             // _dn variants: same swap/our_swap requirements but a higher avail ceiling. We treat
             // a swap_X_dn=true value as "swap pressure persists" and gate exit on it being false.
-            let swap_elev_dn  = swap_used >= t * 5 / 100  && a > 0 && a < 4608 && our_swap;
-            let swap_crit_dn  = swap_used >= t * 12 / 100 && a > 0 && a < 3584 && our_swap;
+            let swap_elev_dn = swap_used >= t * 5 / 100 && a > 0 && a < 4608 && our_swap;
+            let swap_crit_dn = swap_used >= t * 12 / 100 && a > 0 && a < 3584 && our_swap;
             let swap_emerg_dn = swap_used >= t * 20 / 100 && a > 0 && a < 2560 && our_swap;
             // Entry: pure sys_avail at tight thresholds, OR true swap thrash.
-            let emerg_up = (r >= rss_emerg && a > 0 && a < 1024)
-                || (a > 0 && a < 512)
-                || swap_emerg_up;
-            let crit_up = (r >= crit_rss && a > 0 && a < 1536)
-                || (a > 0 && a < 768)
-                || swap_crit_up;
-            let elev_up = (r >= rss_elev && a > 0 && a < 2048)
-                || (a > 0 && a < 1024)
-                || swap_elev_up;
+            let emerg_up =
+                (r >= rss_emerg && a > 0 && a < 1024) || (a > 0 && a < 512) || swap_emerg_up;
+            let crit_up =
+                (r >= crit_rss && a > 0 && a < 1536) || (a > 0 && a < 768) || swap_crit_up;
+            let elev_up =
+                (r >= rss_elev && a > 0 && a < 2048) || (a > 0 && a < 1024) || swap_elev_up;
             // Exit: hysteresis on avail AND no active swap pressure (swap_X_dn=false). If swap
             // pages have not drained, we stay in the higher level. Swap pages only page-in lazily
             // on access, so we cannot drive swap_X_dn to false from here — but we can stop
             // oscillating around the entry boundary by requiring more headroom for exit.
-            let emerg_dn = (a == 0 || a >= 768)  && !swap_emerg_dn;
-            let crit_dn  = (a == 0 || a >= 1024) && !swap_crit_dn;
-            let elev_dn  = (a == 0 || a >= 1280) && !swap_elev_dn;
+            let emerg_dn = (a == 0 || a >= 768) && !swap_emerg_dn;
+            let crit_dn = (a == 0 || a >= 1024) && !swap_crit_dn;
+            let elev_dn = (a == 0 || a >= 1280) && !swap_elev_dn;
 
             return match current {
                 PressureLevel::Emergency => {
@@ -1180,7 +1174,10 @@ impl MemoryGuard {
         }
         // Throttle: at most one adaptation every 2 s. Prevents thrashing on noisy RSS reads.
         {
-            let mut last = self.last_adaptive_cap_check.lock().expect("adaptive_cap_check");
+            let mut last = self
+                .last_adaptive_cap_check
+                .lock()
+                .expect("adaptive_cap_check");
             if last.elapsed() < Duration::from_secs(2) {
                 return None;
             }
@@ -1214,7 +1211,9 @@ impl MemoryGuard {
         // This filters single-sample transient spikes (RocksDB flush burst, etc.) that
         // resolve within one poll interval and would otherwise trigger an unnecessary shrink.
         if is_above_shrink_threshold {
-            let prev = self.above_threshold_consecutive.fetch_add(1, Ordering::Relaxed);
+            let prev = self
+                .above_threshold_consecutive
+                .fetch_add(1, Ordering::Relaxed);
             if prev < 1 {
                 // First high-RSS poll: record but don't act yet.
                 return None;
@@ -1226,7 +1225,8 @@ impl MemoryGuard {
             // Over budget: shrink hard toward (budget * 0.65 / rss) fraction of current.
             // 0.65 coefficient targets 65% of budget so the next eviction batch actually
             // brings RSS below the budget threshold before the next poll.
-            let scaled = (current as u128 * (budget as u128 * 650 / 1000) / rss_mb.max(1) as u128) as usize;
+            let scaled =
+                (current as u128 * (budget as u128 * 650 / 1000) / rss_mb.max(1) as u128) as usize;
             scaled.max(hard_floor)
         } else if ratio_x1000 >= 900 {
             // Approaching budget (90-100%): cut 30%.
@@ -1238,7 +1238,10 @@ impl MemoryGuard {
             // stabilise, breaking the rapid oscillation where we cut every 2 s indefinitely.
             const SHRINK_COOLDOWN_SECS: u64 = 20;
             {
-                let last_shrink = self.last_adaptive_cap_shrink.lock().expect("last_shrink lock");
+                let last_shrink = self
+                    .last_adaptive_cap_shrink
+                    .lock()
+                    .expect("last_shrink lock");
                 if last_shrink.elapsed().as_secs() < SHRINK_COOLDOWN_SECS {
                     return None;
                 }
@@ -1266,13 +1269,20 @@ impl MemoryGuard {
         }
         // Hysteresis: only emit an adjustment if it moves at least 3% of current cap —
         // small jiggles waste the eviction-walk CPU when shrinking.
-        let delta = if target > current { target - current } else { current - target };
+        let delta = if target > current {
+            target - current
+        } else {
+            current - target
+        };
         if delta < (current / 33).max(8 * 1024) {
             return None;
         }
         // Record shrink timestamp when the cap decreases.
         if target < current {
-            let mut last_shrink = self.last_adaptive_cap_shrink.lock().expect("last_shrink lock");
+            let mut last_shrink = self
+                .last_adaptive_cap_shrink
+                .lock()
+                .expect("last_shrink lock");
             *last_shrink = Instant::now();
             // Reset consecutive counter — the shrink consumed the accumulated pressure signal.
             self.above_threshold_consecutive.store(0, Ordering::Relaxed);
@@ -1422,6 +1432,9 @@ mod memory_tier_tests {
     fn extended_sixteen_class_gets_tight_download_ahead_cap() {
         assert_eq!(MemoryGuard::tier_max_download_ahead_blocks(15921), 320);
         assert_eq!(MemoryGuard::tier_max_download_ahead_blocks(18 * 1024), 320);
-        assert_eq!(MemoryGuard::tier_max_download_ahead_blocks(18 * 1024 + 1), 512);
+        assert_eq!(
+            MemoryGuard::tier_max_download_ahead_blocks(18 * 1024 + 1),
+            512
+        );
     }
 }

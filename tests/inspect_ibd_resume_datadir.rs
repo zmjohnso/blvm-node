@@ -17,7 +17,9 @@ use std::path::PathBuf;
 #[ignore = "Touches live RocksDB; stop blvm. Requires BLVM_INSPECT_DATADIR."]
 fn inspect_ibd_resume_datadir() -> anyhow::Result<()> {
     let dir: PathBuf = std::env::var("BLVM_INSPECT_DATADIR")
-        .expect("Set BLVM_INSPECT_DATADIR to your node data directory (same as blvm Data directory)")
+        .expect(
+            "Set BLVM_INSPECT_DATADIR to your node data directory (same as blvm Data directory)",
+        )
         .into();
 
     println!("BLVM_INSPECT_DATADIR = {}", dir.display());
@@ -46,11 +48,7 @@ fn inspect_ibd_resume_datadir() -> anyhow::Result<()> {
     );
     println!(
         "ibd_utxo_muhash_running: {}",
-        if mh.is_some() {
-            "present"
-        } else {
-            "<missing>"
-        }
+        if mh.is_some() { "present" } else { "<missing>" }
     );
     println!("ibd_utxos tree empty: {ibd_empty}");
     println!("effective_tip (min(chain_tip, watermark)): {effective}");
@@ -60,7 +58,9 @@ fn inspect_ibd_resume_datadir() -> anyhow::Result<()> {
     );
 
     if wm.is_none() && chain_tip > 0 {
-        println!("NOTE: missing watermark → node treats watermark as 0 (full UTXO replay from block 1).");
+        println!(
+            "NOTE: missing watermark → node treats watermark as 0 (full UTXO replay from block 1)."
+        );
     }
     if wm == Some(0) && chain_tip > 0 {
         println!("NOTE: watermark explicitly 0 with blocks indexed → typically force_set_ibd_utxo_watermark(0) or never flushed.");

@@ -16,11 +16,11 @@ mod chunk_assigner;
 mod download;
 mod feeder;
 mod headers;
+#[cfg(feature = "production")]
+mod ibd_staging;
 mod memory;
 mod prefetch;
 mod types;
-#[cfg(feature = "production")]
-mod ibd_staging;
 #[cfg(feature = "production")]
 mod validation_loop;
 
@@ -759,9 +759,7 @@ impl ParallelIBD {
             }
             info!(
                 "IBD v2 prefetch: {} workers, queue={}; gap-fill overflow: {} workers",
-                prefetch_workers,
-                max_prefetches_in_flight,
-                gap_fill_workers
+                prefetch_workers, max_prefetches_in_flight, gap_fill_workers
             );
             (in_tx, gap_tx_v2, bridge, out_rx)
         };
@@ -893,13 +891,15 @@ impl ParallelIBD {
                                     start, end, CHUNK_OUTER_DEADLINE_SECS
                                 );
                                 peer_scorer_clone.record_failure(
-                                    peer_id.parse::<std::net::SocketAddr>().unwrap_or_else(|_| {
-                                        "0.0.0.0:0".parse().unwrap()
-                                    }),
+                                    peer_id
+                                        .parse::<std::net::SocketAddr>()
+                                        .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap()),
                                 );
                                 Err(anyhow::anyhow!(
                                     "Chunk {}-{}: outer deadline {}s",
-                                    start, end, CHUNK_OUTER_DEADLINE_SECS
+                                    start,
+                                    end,
+                                    CHUNK_OUTER_DEADLINE_SECS
                                 ))
                             }
                         };
@@ -1576,8 +1576,14 @@ impl ParallelIBD {
                 self.bip54_activation_from_version_bits
                     .fetch_min(c, Ordering::AcqRel);
             }
-            let cur = self.bip54_activation_from_version_bits.load(Ordering::Acquire);
-            if cur == u64::MAX { None } else { Some(cur) }
+            let cur = self
+                .bip54_activation_from_version_bits
+                .load(Ordering::Acquire);
+            if cur == u64::MAX {
+                None
+            } else {
+                Some(cur)
+            }
         };
 
         let bip54_active = blvm_protocol::bip_validation::is_bip54_active_at(
@@ -1969,56 +1975,56 @@ impl ParallelIBD {
         // Returns true only if there is actual witness data (non-empty stack items).
         // An all-empty Vec<Vec<Witness>> (pre-SegWit blocks) does NOT count as having witnesses
         // and should not be stored, to avoid blocking re-download of SegWit blocks later.
-        let block_has_witness_data =
-            |w: &[Vec<Witness>]| w.iter().any(|tx_w| tx_w.iter().any(|stack| !stack.is_empty()));
+        let block_has_witness_data = |w: &[Vec<Witness>]| {
+            w.iter()
+                .any(|tx_w| tx_w.iter().any(|stack| !stack.is_empty()))
+        };
 
         // Pre-serialize witness payloads once (shared by RocksDB unified flush and legacy per-CF batches).
-        let witness_blobs: Vec<Option<Vec<u8>>> = if pending
-            .iter()
-            .any(|(_, w, _)| block_has_witness_data(w))
-        {
-            #[cfg(feature = "rayon")]
-            {
-                use blvm_protocol::rayon::iter::IntoParallelRefIterator;
-                use blvm_protocol::rayon::prelude::*;
-                let witness_data_vec: Vec<(usize, Vec<u8>)> = pending
-                    .par_iter()
-                    .enumerate()
-                    .filter_map(|(i, (_, witnesses, _))| {
-                        if block_has_witness_data(witnesses) {
-                            match bincode::serialize(witnesses.as_ref()) {
-                                Ok(data) => Some((i, data)),
-                                Err(_) => None,
+        let witness_blobs: Vec<Option<Vec<u8>>> =
+            if pending.iter().any(|(_, w, _)| block_has_witness_data(w)) {
+                #[cfg(feature = "rayon")]
+                {
+                    use blvm_protocol::rayon::iter::IntoParallelRefIterator;
+                    use blvm_protocol::rayon::prelude::*;
+                    let witness_data_vec: Vec<(usize, Vec<u8>)> = pending
+                        .par_iter()
+                        .enumerate()
+                        .filter_map(|(i, (_, witnesses, _))| {
+                            if block_has_witness_data(witnesses) {
+                                match bincode::serialize(witnesses.as_ref()) {
+                                    Ok(data) => Some((i, data)),
+                                    Err(_) => None,
+                                }
+                            } else {
+                                None
                             }
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+                        })
+                        .collect();
 
-                let mut v = vec![None; pending.len()];
-                for (i, data) in witness_data_vec {
-                    v[i] = Some(data);
-                }
-                v
-            }
-
-            #[cfg(not(feature = "rayon"))]
-            {
-                let mut v = vec![None; pending.len()];
-                for i in 0..pending.len() {
-                    let witnesses = &pending[i].1;
-                    if block_has_witness_data(witnesses) {
-                        v[i] = Some(bincode::serialize(witnesses.as_ref()).map_err(|e| {
-                            anyhow::anyhow!("Failed to serialize witnesses: {}", e)
-                        })?);
+                    let mut v = vec![None; pending.len()];
+                    for (i, data) in witness_data_vec {
+                        v[i] = Some(data);
                     }
+                    v
                 }
-                v
-            }
-        } else {
-            vec![None; pending.len()]
-        };
+
+                #[cfg(not(feature = "rayon"))]
+                {
+                    let mut v = vec![None; pending.len()];
+                    for i in 0..pending.len() {
+                        let witnesses = &pending[i].1;
+                        if block_has_witness_data(witnesses) {
+                            v[i] = Some(bincode::serialize(witnesses.as_ref()).map_err(|e| {
+                                anyhow::anyhow!("Failed to serialize witnesses: {}", e)
+                            })?);
+                        }
+                    }
+                    v
+                }
+            } else {
+                vec![None; pending.len()]
+            };
 
         let metadata_blobs: Vec<Vec<u8>> = (0..pending.len())
             .map(|i| {

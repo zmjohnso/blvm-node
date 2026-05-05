@@ -758,19 +758,20 @@ impl Node {
                     }
                 };
                 #[cfg(feature = "production")]
-                let watermark_val = match crate::storage::ibd_autorepair::reconcile_ibd_utxo_watermark_with_disk(
-                    self.storage.as_ref(),
-                    watermark_val,
-                ) {
-                    Ok(w) => w,
-                    Err(e) => {
-                        warn!(
+                let watermark_val =
+                    match crate::storage::ibd_autorepair::reconcile_ibd_utxo_watermark_with_disk(
+                        self.storage.as_ref(),
+                        watermark_val,
+                    ) {
+                        Ok(w) => w,
+                        Err(e) => {
+                            warn!(
                             "[START_COMPONENTS] reconcile_ibd_utxo_watermark_with_disk failed ({}); using disk watermark as read",
                             e
                         );
-                        watermark_val
-                    }
-                };
+                            watermark_val
+                        }
+                    };
 
                 #[cfg(feature = "production")]
                 if watermark_val > 0 {

@@ -28,7 +28,10 @@ struct MemTree {
 
 impl Tree for MemTree {
     fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.inner.lock().unwrap().insert(key.to_vec(), value.to_vec());
+        self.inner
+            .lock()
+            .unwrap()
+            .insert(key.to_vec(), value.to_vec());
         Ok(())
     }
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -127,10 +130,7 @@ fn outpoint_to_deletion_key(op: &OutPoint) -> UtxoDeletionKey {
     k
 }
 
-fn build_delta(
-    additions: Vec<(OutPoint, UTXO)>,
-    deletions: Vec<OutPoint>,
-) -> UtxoDelta {
+fn build_delta(additions: Vec<(OutPoint, UTXO)>, deletions: Vec<OutPoint>) -> UtxoDelta {
     let mut adds: FxHashMap<OutPoint, Arc<UTXO>> = FxHashMap::default();
     for (op, u) in additions {
         adds.insert(op, Arc::new(u));

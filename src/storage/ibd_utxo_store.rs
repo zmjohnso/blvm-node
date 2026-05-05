@@ -16,11 +16,11 @@ use crate::storage::disk_utxo::{
 };
 use anyhow::Result;
 use blvm_muhash::{serialize_coin_for_muhash, MuHash3072};
-use hex;
 use blvm_protocol::block::compute_block_tx_ids;
 use blvm_protocol::transaction::is_coinbase;
 use blvm_protocol::types::{OutPoint, UtxoSet, UTXO};
 use dashmap::{DashMap, DashSet};
+use hex;
 use rustc_hash::{FxHashMap, FxHashSet};
 #[cfg(feature = "production")]
 use std::str::FromStr;
@@ -162,7 +162,9 @@ fn pack_flush_package(raw: Vec<PendingLogEntry>) -> Option<PendingFlushPackage> 
     })
 }
 
-fn dedupe_to_batch_and_max(mut v: Vec<PendingLogEntry>) -> (PendingFlushBatch, u64, FxHashSet<u32>) {
+fn dedupe_to_batch_and_max(
+    mut v: Vec<PendingLogEntry>,
+) -> (PendingFlushBatch, u64, FxHashSet<u32>) {
     if v.is_empty() {
         return (Vec::new(), 0, FxHashSet::default());
     }
@@ -562,10 +564,7 @@ impl IbdUtxoStore {
     }
 
     pub fn recently_accessed_len(&self) -> usize {
-        self.recently_accessed
-            .lock()
-            .map(|g| g.len())
-            .unwrap_or(0)
+        self.recently_accessed.lock().map(|g| g.len()).unwrap_or(0)
     }
 
     pub fn in_flight_len(&self) -> usize {
@@ -990,7 +989,9 @@ impl IbdUtxoStore {
                 // POST-DISK in_flight scan: catches the residual race where a flush committed
                 // X to disk DURING the disk load above (so disk missed it), then removed X
                 // from in_flight. Rare but necessary for full coverage.
-                if self.max_entries_effective() != usize::MAX && !self.in_flight_insertions.is_empty() {
+                if self.max_entries_effective() != usize::MAX
+                    && !self.in_flight_insertions.is_empty()
+                {
                     for key in &keys_scanned {
                         let op = key_to_outpoint(key);
                         if map.contains_key(&op) {
@@ -1089,16 +1090,17 @@ impl IbdUtxoStore {
         // Eagerly register inserts into in_flight_insertions (DashMap: no global lock).
         if self.max_entries_effective() != usize::MAX && !batch.inserts.is_empty() {
             for (key, arc) in &batch.inserts {
-                self.in_flight_insertions.entry(*key).or_insert_with(|| Arc::clone(arc));
+                self.in_flight_insertions
+                    .entry(*key)
+                    .or_insert_with(|| Arc::clone(arc));
             }
         }
         self.push_to_pending_shards(
-            batch.deletes.iter().map(|k| (*k, None)).chain(
-                batch
-                    .inserts
-                    .iter()
-                    .map(|(k, v)| (*k, Some(Arc::clone(v)))),
-            ),
+            batch
+                .deletes
+                .iter()
+                .map(|k| (*k, None))
+                .chain(batch.inserts.iter().map(|(k, v)| (*k, Some(Arc::clone(v))))),
             block_height,
         );
         // push_to_pending_shards updates the global counter once per call.
@@ -1170,14 +1172,17 @@ impl IbdUtxoStore {
         // workers each take a shard lock — no single bottleneck, no BPS regression.
         if self.max_entries_effective() != usize::MAX && !add_scratch.is_empty() {
             for (key, arc) in add_scratch.iter() {
-                self.in_flight_insertions.entry(*key).or_insert_with(|| Arc::clone(arc));
+                self.in_flight_insertions
+                    .entry(*key)
+                    .or_insert_with(|| Arc::clone(arc));
             }
         }
         self.push_to_pending_shards(
-            del_scratch
-                .iter()
-                .map(|&k| (k, None))
-                .chain(add_scratch.iter().map(|(k, arc)| (*k, Some(Arc::clone(arc))))),
+            del_scratch.iter().map(|&k| (k, None)).chain(
+                add_scratch
+                    .iter()
+                    .map(|(k, arc)| (*k, Some(Arc::clone(arc)))),
+            ),
             block_height,
         );
         // Batch the recently_accessed updates: previously locked once per addition.
@@ -1253,7 +1258,10 @@ impl IbdUtxoStore {
     /// high-height mutations while lower heights are still outstanding only in RAM, advancing
     /// `ibd_utxo_watermark` past a durable UTXO state that matches sequential consensus —
     /// restart then fails with `UTXO not found` at H+1 (forensic failure mode).
-    fn drain_pending_through_height(&self, max_block_height_inclusive: u64) -> Vec<PendingLogEntry> {
+    fn drain_pending_through_height(
+        &self,
+        max_block_height_inclusive: u64,
+    ) -> Vec<PendingLogEntry> {
         let approx = self.pending_log_size.load(Ordering::Relaxed);
         let mut all = Vec::with_capacity(approx.min(65536));
         let mut drained = 0usize;
@@ -1301,7 +1309,9 @@ impl IbdUtxoStore {
         }
         for (key, value_opt) in pkg.ops.iter() {
             if let Some(arc) = value_opt {
-                self.in_flight_insertions.entry(*key).or_insert_with(|| Arc::clone(arc));
+                self.in_flight_insertions
+                    .entry(*key)
+                    .or_insert_with(|| Arc::clone(arc));
             }
         }
     }
@@ -1438,10 +1448,11 @@ impl IbdUtxoStore {
                 for (key, value_opt) in chunk {
                     match value_opt {
                         Some((start, len)) => {
-                            let utxo: UTXO = bincode::deserialize(
-                                &slab[*start as usize..][..*len as usize],
-                            )
-                            .map_err(|e| anyhow::anyhow!("UTXO deserialize for muhash: {}", e))?;
+                            let utxo: UTXO =
+                                bincode::deserialize(&slab[*start as usize..][..*len as usize])
+                                    .map_err(|e| {
+                                        anyhow::anyhow!("UTXO deserialize for muhash: {}", e)
+                                    })?;
                             let op = key_to_outpoint(key);
                             let pre = utxo_muhash_preimage_ibd(&op, &utxo);
                             *mh = mh.clone().insert(&pre);

@@ -16,14 +16,16 @@ use crate::storage::ibd_utxo_store::{IbdUtxoStore, PendingFlushPackage};
 use crate::storage::Storage;
 use anyhow::Result;
 use blvm_protocol::bip_validation::Bip30Index;
-use blvm_protocol::{segwit::Witness, BitcoinProtocolEngine, Block, BlockHeader, Hash, UtxoSet, UTXO};
+use blvm_protocol::{
+    segwit::Witness, BitcoinProtocolEngine, Block, BlockHeader, Hash, UtxoSet, UTXO,
+};
+use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-use parking_lot::Mutex;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, warn};
@@ -170,9 +172,13 @@ pub(crate) fn ibd_v2_retire_apply_utxo_delta(
         // visible to the kernel within the same ~2s poll cycle.
         if evicted > 32_768 {
             #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
-            unsafe { libmimalloc_sys::mi_collect(true); }
+            unsafe {
+                libmimalloc_sys::mi_collect(true);
+            }
             #[cfg(target_os = "linux")]
-            unsafe { libc::malloc_trim(0); }
+            unsafe {
+                libc::malloc_trim(0);
+            }
             // Reset the normal heap-trim throttle so the next periodic trim doesn't skip.
             LAST_IBD_HEAP_TRIM_WALL_MS.store(0, Ordering::Relaxed);
         }
@@ -223,8 +229,8 @@ pub(crate) fn ibd_v2_retire_apply_utxo_delta(
         // pending hovered at 2k-9k, leaving protected UTXOs stuck and causing eviction/miss.
         let pending_now = store.pending_len();
         const CRITICAL_MIN_FLUSH_OPS: usize = 1_000;
-        let should_force = pressure_level == PressureLevel::Emergency
-            || pending_now >= CRITICAL_MIN_FLUSH_OPS;
+        let should_force =
+            pressure_level == PressureLevel::Emergency || pending_now >= CRITICAL_MIN_FLUSH_OPS;
         let batch = if should_force {
             store.take_flush_batch_force_through(next_height)
         } else {
@@ -336,10 +342,9 @@ fn push_utxo_flush_from_retire(
         // `commit_no_wal` leaves rows in the memtable until flush_cf — persist SST first so a
         // crash cannot advance `ibd_utxo_watermark` past durable ibd_utxos rows (see IbdUtxoStore::flush_disk).
         store_clone.flush_disk()?;
-        storage_clone.chain().persist_ibd_utxo_flush_checkpoint(
-            prepared.max_block_height,
-            &muhash_running,
-        )?;
+        storage_clone
+            .chain()
+            .persist_ibd_utxo_flush_checkpoint(prepared.max_block_height, &muhash_running)?;
         // Release height-based eviction protection now that all ops for these heights are
         // on disk. This makes cache entries at those heights eligible for eviction, which
         // reduces protected_len from O(pipeline_depth) back toward zero after each flush.
@@ -813,9 +818,9 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
     // Async flush: block batches on std::thread (validation runs off tokio).
     let mut flush_handles: VecDeque<std::thread::JoinHandle<Result<()>>> = VecDeque::new();
-    let utxo_flush_handles = Arc::new(Mutex::new(VecDeque::<
-        std::thread::JoinHandle<Result<()>>,
-    >::new()));
+    let utxo_flush_handles = Arc::new(Mutex::new(
+        VecDeque::<std::thread::JoinHandle<Result<()>>>::new(),
+    ));
     let (max_block_flushes_in_flight, max_utxo_flushes_under_pressure) = {
         let g = mem_mtx.lock();
         (g.max_block_flushes, g.max_utxo_flushes)
@@ -848,7 +853,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     let mut pending_results: BTreeMap<u64, ValidateResult> = BTreeMap::new();
     // BTreeMap keyed by height so we can drop entries early (as soon as worker_cache_put_protected
     // has run for that height) without a linear scan. VecDeque forced us to wait until retire.
-    let mut spec_adds: std::collections::BTreeMap<u64, Arc<UtxoSet>> = std::collections::BTreeMap::new();
+    let mut spec_adds: std::collections::BTreeMap<u64, Arc<UtxoSet>> =
+        std::collections::BTreeMap::new();
 
     // Cache BLVM_IBD_SNAPSHOT_DIR once at loop init (was std::env::var per block)
     let snapshot_dir_base: Option<String> = std::env::var("BLVM_IBD_SNAPSHOT_DIR").ok();
@@ -904,12 +910,9 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
     let storage_for_retire = Arc::clone(&storage_clone);
 
-    let ibd_muhash_accumulator: Arc<Mutex<blvm_muhash::MuHash3072>> =
-        Arc::new(Mutex::new(
-            crate::storage::ibd_utxo_muhash::load_ibd_muhash_from_chain(
-                storage_clone.chain(),
-            )?,
-        ));
+    let ibd_muhash_accumulator: Arc<Mutex<blvm_muhash::MuHash3072>> = Arc::new(Mutex::new(
+        crate::storage::ibd_utxo_muhash::load_ibd_muhash_from_chain(storage_clone.chain())?,
+    ));
 
     // Background retire: applies staged deltas, UTXO store update, UTXO flush spawns, commitment.
     let retire_err_join = retire_err.clone();
@@ -1104,7 +1107,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     }
     drop(valjob_rx); // workers hold all live Receiver clones; dropping the prototype lets shutdown propagate
     drop(valres_tx); // workers hold all live Sender clones
-    // ────────────────────────────────────────────────────────────────────────
+                     // ────────────────────────────────────────────────────────────────────────
 
     loop {
         // === DISPATCH PHASE: fill pipeline up to pipeline_depth_live ===
@@ -1124,8 +1127,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
             // Get next block: blocking if no in-flight work, non-blocking otherwise.
             let block_tuple_opt = if is_first {
-                const FEEDER_WAIT_TIMEOUT: std::time::Duration =
-                    std::time::Duration::from_secs(5);
+                const FEEDER_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
                 let next_block = loop {
                     let mut guard = feeder_state.0.lock();
                     if let Some((arc_b, w, input_keys, u, tx_ids, spec_adds, est_bytes)) =
@@ -1179,11 +1181,14 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 // Non-blocking: grab lookahead block only if already in feeder.
                 let next_h = next_validation_height;
                 let mut guard = feeder_state.0.lock();
-                guard.0.remove(next_h).map(|(arc_b, w, ik, u, tx_ids, spec_adds, est_bytes)| {
-                    guard.2 = guard.2.saturating_sub(est_bytes);
-                    feeder_state.1.notify_one();
-                    (next_h, arc_b, w, ik, u, tx_ids, spec_adds, est_bytes)
-                })
+                guard
+                    .0
+                    .remove(next_h)
+                    .map(|(arc_b, w, ik, u, tx_ids, spec_adds, est_bytes)| {
+                        guard.2 = guard.2.saturating_sub(est_bytes);
+                        feeder_state.1.notify_one();
+                        (next_h, arc_b, w, ik, u, tx_ids, spec_adds, est_bytes)
+                    })
             };
 
             let (
@@ -1251,7 +1256,9 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             if h <= 200 {
                 debug!(
                     "[IBD_V2] height={} keys_needed={} store_len={}",
-                    h, keys_v2_buf.len(), ibd_store_v2_for_validation.len()
+                    h,
+                    keys_v2_buf.len(),
+                    ibd_store_v2_for_validation.len()
                 );
             }
 
@@ -1266,21 +1273,16 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             // the O(staged.len() × still_missing) walk that dominated `utxo_base_ms` (~100
             // ms/block when retire was behind).
             spec_adds_snapshot_buf.clear();
-            spec_adds_snapshot_buf.extend(
-                spec_adds.iter().map(|(sh, set)| (*sh, Arc::clone(set)))
-            );
+            spec_adds_snapshot_buf.extend(spec_adds.iter().map(|(sh, set)| (*sh, Arc::clone(set))));
             // Move the filled buffer into the job; replace with a fresh pre-sized buf for the
             // next dispatch. Avoids the second Vec alloc + Arc-tuple memcpy from .clone().
-            let spec_adds_snapshot = std::mem::replace(
-                &mut spec_adds_snapshot_buf,
-                Vec::with_capacity(64),
-            );
+            let spec_adds_snapshot =
+                std::mem::replace(&mut spec_adds_snapshot_buf, Vec::with_capacity(64));
 
             // Optional debug/profile snapshot (rare, off by default).
             if let Some(ref base) = snapshot_dir_base {
                 const SNAPSHOT_HEIGHTS: &[u64] = &[
-                    50_000, 90_000, 125_000, 133_000, 145_000, 175_000, 181_000, 190_000,
-                    200_000,
+                    50_000, 90_000, 125_000, 133_000, 145_000, 175_000, 181_000, 190_000, 200_000,
                 ];
                 if SNAPSHOT_HEIGHTS.contains(&h) {
                     let utxo_set = ibd_store_v2_for_validation.to_utxo_set_snapshot();
@@ -1369,7 +1371,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             // the spec_adds entry is no longer needed and can be freed now.
             if let Some(set) = spec_adds.remove(&vres.height) {
                 let freed = (set.len() as u64).saturating_mul(64);
-                spec_adds_bytes.fetch_sub(freed.min(spec_adds_bytes.load(Ordering::Relaxed)), Ordering::Relaxed);
+                spec_adds_bytes.fetch_sub(
+                    freed.min(spec_adds_bytes.load(Ordering::Relaxed)),
+                    Ordering::Relaxed,
+                );
             }
             pending_results.insert(vres.height, vres);
         }
@@ -1379,7 +1384,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 Ok(vres) => {
                     if let Some(set) = spec_adds.remove(&vres.height) {
                         let freed = (set.len() as u64).saturating_mul(64);
-                        spec_adds_bytes.fetch_sub(freed.min(spec_adds_bytes.load(Ordering::Relaxed)), Ordering::Relaxed);
+                        spec_adds_bytes.fetch_sub(
+                            freed.min(spec_adds_bytes.load(Ordering::Relaxed)),
+                            Ordering::Relaxed,
+                        );
                     }
                     pending_results.insert(vres.height, vres);
                 }
@@ -1407,7 +1415,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         {
             if let Some((_, set)) = spec_adds.pop_first() {
                 let freed = (set.len() as u64).saturating_mul(64);
-                spec_adds_bytes.fetch_sub(freed.min(spec_adds_bytes.load(Ordering::Relaxed)), Ordering::Relaxed);
+                spec_adds_bytes.fetch_sub(
+                    freed.min(spec_adds_bytes.load(Ordering::Relaxed)),
+                    Ordering::Relaxed,
+                );
             }
         }
 
@@ -1435,8 +1446,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         let validation_result = vres.result;
 
         #[cfg(feature = "profile")]
-        let ibd_log_this_height = ibd_blocked_log
-            && ibd_profile_height_matches_sample(ibd_profile_sample, next_height);
+        let ibd_log_this_height =
+            ibd_blocked_log && ibd_profile_height_matches_sample(ibd_profile_sample, next_height);
         #[cfg(feature = "profile")]
         if ibd_log_this_height {
             blvm_protocol::profile_log!(
@@ -1494,7 +1505,6 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         let utxo_base_tune_ms = utxo_base_tune_ms_holder;
         #[allow(unused_variables)]
         let gap_fill_ms = 0u64;
-
 
         // Lock-free pressure read: retire thread publishes the latest level via
         // `publish_ibd_pressure` after each `should_flush`. Avoids serializing on `mem_mtx`,
@@ -1929,9 +1939,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             let rate_str = if blocks_synced < 100 {
                 "warming up (rate after block 100)".to_string()
             } else if blocks_synced >= 1000 && blocks_since_last > 0 {
-                format!(
-                    "{recent_rate:.1} blocks/s (avg since start: {average_rate:.1} blocks/s)"
-                )
+                format!("{recent_rate:.1} blocks/s (avg since start: {average_rate:.1} blocks/s)")
             } else {
                 format!("{average_rate:.1} blocks/s")
             };
@@ -2064,22 +2072,24 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         let storage_shutdown = Arc::clone(&storage_clone);
         let mh_shutdown = Arc::clone(&ibd_muhash_accumulator);
         let heights = Arc::clone(&pkg.heights);
-        utxo_flush_handles.lock().push_back(std::thread::spawn(move || {
-            let prepared = pkg.prepare_for_disk()?;
-            let muhash_running = {
-                let mut mh_guard = mh_shutdown.lock();
-                store_clone.flush_prepared_package(&prepared, Some(&mut *mh_guard))?;
-                mh_guard.serialize_running_state()
-            };
-            store_clone.flush_disk()?;
-            storage_shutdown.chain().persist_ibd_utxo_flush_checkpoint(
-                prepared.max_block_height,
-                &muhash_running,
-            )?;
-            store_clone.release_protected_heights(&heights);
-            store_clone.note_utxo_flush_completed(prepared.max_block_height);
-            Ok(())
-        }));
+        utxo_flush_handles
+            .lock()
+            .push_back(std::thread::spawn(move || {
+                let prepared = pkg.prepare_for_disk()?;
+                let muhash_running = {
+                    let mut mh_guard = mh_shutdown.lock();
+                    store_clone.flush_prepared_package(&prepared, Some(&mut *mh_guard))?;
+                    mh_guard.serialize_running_state()
+                };
+                store_clone.flush_disk()?;
+                storage_shutdown.chain().persist_ibd_utxo_flush_checkpoint(
+                    prepared.max_block_height,
+                    &muhash_running,
+                )?;
+                store_clone.release_protected_heights(&heights);
+                store_clone.note_utxo_flush_completed(prepared.max_block_height);
+                Ok(())
+            }));
     }
     for handle in utxo_flush_handles.lock().drain(..) {
         match handle.join() {
@@ -2144,7 +2154,9 @@ fn run_ibd_retire_loop_with_commitment(
     utxo_flush_handles: Arc<Mutex<VecDeque<JoinHandle<Result<()>>>>>,
     retire_err: Arc<Mutex<Option<anyhow::Error>>>,
     blockstore: Arc<BlockStore>,
-    commitment_tree: Option<Arc<Mutex<blvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree>>>,
+    commitment_tree: Option<
+        Arc<Mutex<blvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree>>,
+    >,
     commitment_cstore: Option<Arc<crate::storage::commitment_store::CommitmentStore>>,
     ibd_muhash: Arc<Mutex<blvm_muhash::MuHash3072>>,
 ) {
@@ -2241,12 +2253,12 @@ fn run_ibd_retire_loop_with_commitment(
             (p, r)
         };
         drop(mem);
-        if let (Some(cref), Some(cstore)) = (
-            commitment_tree.as_ref(),
-            commitment_cstore.as_ref(),
-        ) {
+        if let (Some(cref), Some(cstore)) = (commitment_tree.as_ref(), commitment_cstore.as_ref()) {
             let block_hash = blockstore.get_block_hash(work.block.as_ref());
-            let commitment = { let t = cref.lock(); t.generate_commitment(block_hash, h) };
+            let commitment = {
+                let t = cref.lock();
+                t.generate_commitment(block_hash, h)
+            };
             if let Err(e) = cstore.store_commitment(&block_hash, h, &commitment) {
                 warn!("IBD commitment: store failed at height {}: {}", h, e);
                 *retire_err.lock() = Some(e);

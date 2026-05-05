@@ -47,8 +47,8 @@ pub(crate) fn verify_ibd_utxo_muhash_startup(storage: &Storage) -> Result<()> {
         let mut key = [0u8; 40];
         key.copy_from_slice(&k[..40]);
         let op = key_to_outpoint(&key);
-        let utxo: UTXO =
-            bincode::deserialize(&v).with_context(|| format!("decode ibd_utxos row {:?}", &k[..8]))?;
+        let utxo: UTXO = bincode::deserialize(&v)
+            .with_context(|| format!("decode ibd_utxos row {:?}", &k[..8]))?;
         let pre = utxo_muhash_preimage(&op, &utxo);
         scan = scan.insert(&pre);
     }
