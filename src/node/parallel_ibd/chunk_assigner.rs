@@ -194,14 +194,27 @@ impl ChunkAssigner {
             }
         }
 
-        // Main queue — any peer can take the next sequential chunk.
-        // Per-peer serial (in_flight_per_peer, enforced above) already prevents duplicate
-        // assignment without needing peer matching. Peer matching caused liveness failures:
-        // when a peer's workers exit after consecutive failures, its main-queue chunks became
-        // permanently stuck (only that peer's workers could pick them), requiring the 30-second
-        // coordinator stall broadcast to trickle them into the retry queue one at a time.
+        // Main queue — try the next sequential chunk.
+        //
+        // Peer binding is RESTORED here for assigned (non-retry) chunks.
+        // Background: f684b39 removed peer binding to fix a liveness deadlock where a
+        // permanently-failed peer's assigned chunks could never be picked up. However that
+        // change caused a different regression: with "earliest-first" mode all chunks are
+        // assigned to the LAN peer, but any of the 7+ WAN peers can steal them, inserting
+        // 300-600ms WAN latency into the sequential pipeline and collapsing BPS from 10k+
+        // to ~1200.
+        //
+        // Liveness is still preserved: when the assigned peer fails, the coordinator's
+        // 30-second stall broadcast calls `requeue_chunk_containing_height`, which moves the
+        // stuck chunk into the retry queue with `exclude = Some(failed_peer)`. The retry-queue
+        // path above (lines 169-194) has NO peer binding, so any healthy peer can pick it up.
         let idx = self.next_index.load(Ordering::Relaxed);
         if idx >= self.chunks.len() {
+            return None;
+        }
+        // Only the assigned peer may take this chunk from the main queue.
+        // (chunk_peers is always populated by create_chunks; the slice never outlives chunks.)
+        if !self.chunk_peers.is_empty() && self.chunk_peers[idx] != peer_id {
             return None;
         }
         let (start, end) = self.chunks[idx];
