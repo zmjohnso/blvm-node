@@ -1166,8 +1166,9 @@ pub mod rocksdb_impl {
             };
 
             let default_parallelism = std::thread::available_parallelism()
-                .map(|p| p.get().max(4) as i32)
-                .unwrap_or(4);
+                .map(|p| p.get() as i32)
+                .unwrap_or(2)
+                .max(1);
             let parallelism: i32 = storage_config
                 .and_then(|s| s.rocksdb.as_ref())
                 .and_then(|r| r.parallelism)
