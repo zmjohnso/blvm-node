@@ -771,7 +771,7 @@ pub enum EventType {
     /// Ban list received from peer
     BanListReceived,
 
-    // === §6.4 New Event Types ===
+    // === Extended module / mining events ===
     /// Selective sync policy applied (subscribe, refresh, etc.)
     SelectiveSyncPolicyApplied,
     /// Mining action executed (miningos trigger_action)

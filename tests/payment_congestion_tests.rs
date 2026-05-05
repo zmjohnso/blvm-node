@@ -133,8 +133,7 @@ fn test_add_transaction_batch_full() {
     );
 }
 
-// Note: remove_transaction_from_batch is not currently implemented
-// This test is skipped for now
+// remove_transaction_from_batch is not implemented — no dedicated test yet.
 
 /// Test broadcast batch
 #[test]

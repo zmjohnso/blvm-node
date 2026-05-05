@@ -1,6 +1,4 @@
-//! Peer management: PeerManager, PeerRateLimiter, PeerByteRateLimiter.
-//!
-//! Extracted from network/mod.rs for Phase 1 of complexity remediation.
+//! Peer tables, scoring, rate limits, and eviction helpers used by the network manager.
 
 /// Maximum number of outbound peers to protect from eviction/disconnect.
 /// Core-style: keep best N peers when rotating outbound connections.

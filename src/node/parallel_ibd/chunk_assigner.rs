@@ -1,7 +1,5 @@
-//! Chunk assignment for parallel IBD.
-//!
 //! ChunkAssigner assigns height-ordered chunks to workers. ChunkGuard ensures
-//! chunks are re-queued on drop if not disarmed. Extracted for Phase 2.
+//! chunks are re-queued on drop if not disarmed.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

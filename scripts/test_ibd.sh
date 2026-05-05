@@ -50,7 +50,7 @@ get_peer_info() {
         | jq -r '.result'
 }
 
-# Step 1: Check prerequisites
+# Prerequisites
 section "Checking Prerequisites"
 
 if ! command -v jq &> /dev/null; then
@@ -66,7 +66,7 @@ fi
 
 echo -e "${GREEN}✓ Prerequisites check passed${NC}"
 
-# Step 2: Clear data if requested
+# Optional: clear datadir
 if [ "$CLEAR_DATA" = "true" ]; then
     section "Clearing Blockchain Data"
     
@@ -88,7 +88,7 @@ if [ "$CLEAR_DATA" = "true" ]; then
     fi
 fi
 
-# Step 3: Run unit tests
+# Unit tests (parallel_ibd)
 section "Running Unit Tests"
 
 echo "Running parallel_ibd unit tests..."
@@ -99,7 +99,7 @@ else
     exit 1
 fi
 
-# Step 4: Run integration tests
+# Integration tests
 section "Running Integration Tests"
 
 echo "Running parallel_ibd integration tests..."
@@ -110,7 +110,7 @@ else
     exit 1
 fi
 
-# Step 5: Check if node is running
+# Node RPC status (if running)
 section "Checking Node Status"
 
 if check_node_running; then
@@ -157,7 +157,7 @@ else
     echo "  cargo run --features production -- --network $NETWORK"
 fi
 
-# Step 6: Summary
+# Summary
 section "Test Summary"
 
 echo "Unit tests: $(grep -c 'test result: ok' /tmp/ibd_test_output.log 2>/dev/null || echo 'N/A')"

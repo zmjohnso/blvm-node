@@ -50,11 +50,11 @@ impl SandboxConfig {
         Self {
             allowed_data_dir: data_dir.as_ref().to_path_buf(),
             resource_limits: ResourceLimits::default(),
-            strict_mode: false, // Phase 1: disabled, Phase 2+: enabled
+            strict_mode: false, // Default relaxed policy; use [`Self::strict`] for stronger isolation.
         }
     }
 
-    /// Create strict sandbox config (for Phase 2+)
+    /// Strict sandbox: enables `strict_mode` (stronger OS-level restrictions where supported).
     pub fn strict<P: AsRef<Path>>(data_dir: P) -> Self {
         Self {
             allowed_data_dir: data_dir.as_ref().to_path_buf(),

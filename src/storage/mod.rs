@@ -20,6 +20,8 @@ pub mod disk_utxo;
 pub mod hashing;
 pub mod ibd_autorepair;
 #[cfg(feature = "production")]
+pub mod ibd_utxo_muhash;
+#[cfg(feature = "production")]
 pub mod ibd_utxo_store;
 pub mod pruning;
 pub mod serialization_cache;

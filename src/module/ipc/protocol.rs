@@ -1099,7 +1099,7 @@ pub enum EventPayload {
         ban_count: usize,
     },
 
-    // === §6.4 New Event Types ===
+    // === Extended module / mining events ===
     SelectiveSyncPolicyApplied {
         policy_source: String, // "subscribe", "refresh", "config"
         registry_count: usize,

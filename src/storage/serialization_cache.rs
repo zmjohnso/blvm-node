@@ -27,7 +27,7 @@ fn tx_shard(hash: &Hash) -> usize {
 /// (sequential heights ⇒ ~0% LRU hit rate on that path).
 static HEADER_SERIALIZE_CACHE_BYPASS: AtomicBool = AtomicBool::new(false);
 
-/// Set by `do_flush_to_storage` around the parallel header serialize phase.
+/// Set by `do_flush_to_storage` while parallel header serialization runs during flush.
 #[inline]
 pub fn set_ibd_header_serialize_cache_bypass(on: bool) {
     HEADER_SERIALIZE_CACHE_BYPASS.store(on, Ordering::Relaxed);

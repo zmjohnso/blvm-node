@@ -1,7 +1,6 @@
-//! Connection manager for handling network connections.
+//! Legacy TCP listen/connect helpers.
 //!
-//! Note: This module is deprecated - use Transport abstraction instead.
-//! Extracted from network/mod.rs for Phase 1 of complexity remediation.
+//! Deprecated for new code — prefer [`crate::network::transport::Transport`].
 
 use anyhow::Result;
 use std::net::SocketAddr;

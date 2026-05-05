@@ -1,6 +1,4 @@
-//! Type definitions for parallel IBD.
-//!
-//! Extracted from parallel_ibd/mod.rs for Phase 2 of complexity remediation.
+//! Type definitions for parallel IBD (chunk work items, byte estimates, shared structs).
 
 use blvm_protocol::{segwit::Witness, Block, Hash};
 use std::sync::Arc;
@@ -39,6 +37,10 @@ pub fn estimate_block_bytes(block: &Block, witnesses: &[Vec<Witness>]) -> usize 
 /// instead of re-scanning all inputs on the hot path.
 /// `tx_ids`: precomputed transaction hashes (same order as `block.transactions`) — feeder
 /// skips a duplicate `compute_block_tx_ids` pass.
+/// `spec_adds`: this block's speculative outputs, precomputed on the prefetch worker pool so
+/// the validation dispatcher (single-threaded) does **not** rebuild a per-block `UtxoSet`
+/// (~O(outputs) HashMap inserts + Arc allocations) on its hot path — pre-append outputs on
+/// the prefetch pool before validation starts (same role as a spend-prep worker thread).
 pub type ReadyItem = (
     u64,
     Block,
@@ -46,11 +48,14 @@ pub type ReadyItem = (
     Vec<OutPointKey>,
     rustc_hash::FxHashMap<OutPointKey, Arc<UTXO>>,
     Vec<Hash>,
+    Arc<blvm_consensus::types::UtxoSet>,
 );
 
 /// Block feeder buffer: shared between feeder thread (drains ready_rx) and validation thread.
 /// Feeder inserts; validation removes next block and reads lookahead for protect_keys.
 /// Precomputed tx_ids: feeder computes when inserting to free validation thread from SHA256 work.
+/// Sixth field: precomputed `Arc<UtxoSet>` of this block's speculative outputs (built on the
+/// prefetch worker pool — see `ReadyItem`).
 /// Last field: estimated bytes for this entry (used by feeder byte cap tracking).
 pub type FeederBufferValue = (
     Arc<Block>,
@@ -58,6 +63,7 @@ pub type FeederBufferValue = (
     Vec<OutPointKey>,
     rustc_hash::FxHashMap<OutPointKey, Arc<UTXO>>,
     Vec<Hash>,
+    Arc<blvm_consensus::types::UtxoSet>,
     usize,
 );
 

@@ -68,8 +68,7 @@ pub async fn prioritize_transaction(
     txid: &str,
     fee_delta: f64,
 ) -> Result<Value> {
-    // Note: prioritisetransaction is in mining.rs, but we'll call it through RPC server
-    // For now, return error indicating it needs to be implemented
+    // `prioritisetransaction` is implemented on mining RPC; REST does not delegate yet.
     Err(anyhow::anyhow!(
         "prioritisetransaction not yet exposed via REST API"
     ))

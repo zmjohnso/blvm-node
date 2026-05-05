@@ -158,7 +158,12 @@ fn node_hot_path_once(
     // 7. apply_utxo_delta (direct, no SyncBatch)
     let t_delta = Instant::now();
     if let Some(delta) = utxo_delta {
-        store.apply_utxo_delta(delta, height);
+        let mut del_scratch = Vec::new();
+        let mut add_scratch = Vec::new();
+        let mut evict_scratch = Vec::new();
+        // Bench path: no worker pre-insert, retire must populate the cache itself.
+        store.apply_utxo_delta(&delta, height, &mut del_scratch, &mut add_scratch, false);
+        store.maybe_evict(&mut evict_scratch);
     }
     let delta_ms = t_delta.elapsed().as_secs_f64() * 1000.0;
 

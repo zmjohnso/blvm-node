@@ -3,7 +3,7 @@
 //! Downloads blocks from a peer using pipelined GetData requests.
 //! Core-style: max 16 blocks in flight per peer across all workers.
 
-use crate::network::inventory::MSG_BLOCK;
+use crate::network::inventory::{MSG_BLOCK, MSG_WITNESS_BLOCK};
 use crate::network::protocol::{GetDataMessage, InventoryVector, ProtocolMessage, ProtocolParser};
 use crate::network::NetworkManager;
 use crate::storage::blockstore::BlockStore;
@@ -38,8 +38,17 @@ fn try_load_local_ibd_block(
     let registry = FeatureRegistry::for_protocol(protocol_version);
     let ts = block.header.timestamp;
     let segwit_on = registry.is_feature_active("segwit", height, ts);
+    // Returns true only when there is at least one non-empty witness stack item.
+    // An all-empty structure comes from pre-MSG_WITNESS_BLOCK downloads and must be treated
+    // the same as None so the block is re-fetched with full witness data.
+    let has_real_witnesses =
+        |w: &[Vec<Witness>]| w.iter().any(|tx_w| tx_w.iter().any(|s| !s.is_empty()));
+
     let witnesses = match blockstore.get_witness(&expected_hash)? {
-        Some(w) => w,
+        Some(w) if has_real_witnesses(&w) => w,
+        // Stale all-empty blob stored by a prior MSG_BLOCK download: treat as missing.
+        Some(_) if segwit_on => return Ok(None),
+        Some(w) => w, // pre-segwit block: empty witnesses are correct
         None if !segwit_on => Vec::new(),
         None => return Ok(None),
     };
@@ -165,6 +174,9 @@ pub(crate) async fn download_chunk(
     let mut blocks = Vec::new();
     let mut streamed_block_count: usize = 0;
     let mut progress = BlockDownloadProgress::new();
+    // Used to detect genuinely stuck partial chunks: abort if stall signal arrives
+    // and we have been active for >PARTIAL_STALL_ABORT_SECS without delivering the needed block.
+    let chunk_start_time = std::time::Instant::now();
 
     // Drain stale stall broadcasts accumulated while this worker was finishing its previous chunk.
     // Workers hold stall_rx across the entire worker-task lifetime (one subscription, many chunks).
@@ -297,7 +309,7 @@ pub(crate) async fn download_chunk(
                     first_block_logged = true;
                 }
                 let inventory = vec![InventoryVector {
-                    inv_type: MSG_BLOCK,
+                    inv_type: MSG_WITNESS_BLOCK,
                     hash: block_hash,
                 }];
                 let wire_msg =
@@ -317,6 +329,14 @@ pub(crate) async fn download_chunk(
             break;
         }
     }
+
+    // Hard deadline: if a chunk takes longer than the per-block timeout, abort and retry.
+    // This catches cases where the broadcast stall signal doesn't reach the worker in time
+    // (e.g. channel lag, racing with recv_many in coordinator) or the per-block timeout fires
+    // but is raced by a stall signal. Deadline = per-block timeout so any stuck chunk self-heals.
+    const CHUNK_DEADLINE_SECS: u64 = 30;
+    let chunk_deadline = tokio::time::sleep(Duration::from_secs(CHUNK_DEADLINE_SECS));
+    tokio::pin!(chunk_deadline);
 
     loop {
         let next_result = if progress.last_block_hash.is_none() {
@@ -361,33 +381,41 @@ pub(crate) async fn download_chunk(
                 }
             }
         } else if let Some(ref mut rx) = stall_rx {
-            // We have already received at least one block — we are actively delivering this chunk.
-            // Do NOT abort on a stall signal here: the coordinator needs the block in our range and
-            // we are the worker trying to fetch it. Aborting triggers an infinite retry loop where
-            // every new worker gets killed by the next 30-second broadcast before it can complete.
-            // Drain stall signals (so the channel doesn't accumulate lag) but keep downloading.
-            // The download timeout (download_timeout_secs) handles genuinely stuck peers.
+            // We have started receiving blocks. Race in_flight, stall signal, and hard deadline.
             tokio::select! {
                 r = in_flight.next() => r,
-                stall_res = rx.recv() => {
-                    match stall_res {
-                        Ok(stall_h) => {
-                            if stall_h >= start_height && stall_h <= end_height {
-                                // Drain the stall signal but do not abort — we are already
-                                // delivering this chunk. Let the download timeout decide.
-                                info!("Coordinator stall at {}: chunk {}-{} is active (progress started), continuing download", stall_h, start_height, end_height);
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            warn!("Chunk {}-{}: stall rx lagged {} messages (catching up)", start_height, end_height, n);
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {}
-                    }
+                _ = rx.recv() => {
+                    // Stall signal received — just continue; the hard deadline handles abort timing.
                     continue;
+                }
+                _ = &mut chunk_deadline => {
+                    warn!(
+                        "Chunk {}-{}: hard {}s deadline expired (next_to_send={}, in_flight={}, received={}) — aborting for retry",
+                        start_height, end_height, CHUNK_DEADLINE_SECS,
+                        next_to_send, in_flight.len(), received.len()
+                    );
+                    peer_scorer.record_failure(peer_addr);
+                    return Err(anyhow::anyhow!(
+                        "Chunk hard deadline {}-{}: stuck at height {} after {}s",
+                        start_height, end_height, next_to_send, CHUNK_DEADLINE_SECS
+                    ));
                 }
             }
         } else {
-            in_flight.next().await
+            tokio::select! {
+                r = in_flight.next() => r,
+                _ = &mut chunk_deadline => {
+                    warn!(
+                        "Chunk {}-{}: hard {}s deadline expired (no stall_rx, next_to_send={}) — aborting for retry",
+                        start_height, end_height, CHUNK_DEADLINE_SECS, next_to_send
+                    );
+                    peer_scorer.record_failure(peer_addr);
+                    return Err(anyhow::anyhow!(
+                        "Chunk hard deadline {}-{}: no stall_rx, stuck at height {} after {}s",
+                        start_height, end_height, next_to_send, CHUNK_DEADLINE_SECS
+                    ));
+                }
+            }
         };
 
         let Some((height, block_hash, request_start, block_result, _permit)) = next_result else {
@@ -493,7 +521,7 @@ pub(crate) async fn download_chunk(
                 } else {
                     let block_rx = network.register_block_request(peer_addr, next_hash);
                     let inventory = vec![InventoryVector {
-                        inv_type: MSG_BLOCK,
+                        inv_type: MSG_WITNESS_BLOCK,
                         hash: next_hash,
                     }];
                     let wire_msg = ProtocolParser::serialize_message(&ProtocolMessage::GetData(

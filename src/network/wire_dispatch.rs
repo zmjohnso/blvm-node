@@ -219,11 +219,11 @@ impl NetworkManager {
                         .await;
                 }
 
-                use crate::network::inventory::MSG_BLOCK;
+                use crate::network::inventory::{MSG_BLOCK, MSG_WITNESS_BLOCK};
                 let has_block_requests = getdata
                     .inventory
                     .iter()
-                    .any(|inv| inv.inv_type == MSG_BLOCK);
+                    .any(|inv| inv.inv_type == MSG_BLOCK || inv.inv_type == MSG_WITNESS_BLOCK);
 
                 if has_block_requests {
                     match self.ibd_protection().can_serve_ibd(peer_addr).await {

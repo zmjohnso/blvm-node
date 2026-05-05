@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 #[cfg(feature = "production")]
 use blvm_protocol::types::UTXO;
 #[cfg(feature = "production")]
+use blvm_protocol::{Block, Hash, UtxoSet};
+#[cfg(feature = "production")]
 use crossbeam_channel::{Receiver, Sender};
 #[cfg(feature = "production")]
 use rustc_hash::FxHashMap;
@@ -111,7 +113,7 @@ pub(crate) fn prefetch_build_utxo_map(
     if !to_load.is_empty() && !store.memory_only() {
         let miss_count = to_load.len() as u64;
         let t_disk = std::time::Instant::now();
-        if let Ok((loaded, _)) = load_keys_from_disk(store.disk_clone(), to_load) {
+        if let Ok((loaded, keys_scanned)) = load_keys_from_disk(store.disk_clone(), to_load) {
             let disk_ms = t_disk.elapsed().as_millis() as u64;
             PREFETCH_TOTAL_DISK_MS.fetch_add(disk_ms, Ordering::Relaxed);
             PREFETCH_TOTAL_DISK_READS.fetch_add(miss_count, Ordering::Relaxed);
@@ -132,24 +134,70 @@ pub(crate) fn prefetch_build_utxo_map(
                     store.cache_insert_and_track_batch(&pairs);
                 }
             }
+            // Check in_flight for any keys the disk lookup missed. This handles the race
+            // where a flush is mid-commit (ADD not yet durable) when the disk lookup runs —
+            // the same race that causes IBD_MISSING_UTXO if supplement also misses them.
+            // Supplement has its own pre+post in_flight scan so this is defence-in-depth.
+            if store.max_entries_is_bounded() {
+                store.supplement_in_flight_for_keys(&keys_scanned, &mut full_map);
+            }
         }
     }
     PREFETCH_TOTAL_BLOCKS.fetch_add(1, Ordering::Relaxed);
     full_map
 }
 
-/// Run a single prefetch worker. Receives work items, builds UTXO map, sends to ready queue.
+/// Build the speculative-additions `UtxoSet` for a block: every output the block creates, ready
+/// to plug View(h+k) holes for blocks that arrive at the validation worker before this block's
+/// own validation has retired. Equivalent to `D(h).additions` ∪ intra-block-spent outputs (which
+/// later blocks never reference, so the over-approximation is harmless).
+///
+/// Runs the same compute on the prefetch worker pool (`cpus * 2` threads), which is otherwise
+/// idle while disk MultiGet RTTs complete. Moving this off the validation dispatcher removes
+/// ~O(outputs) HashMap inserts + `Arc::new(UTXO)` allocations from the single-threaded hot path
+/// (~3-15 ms/block at h>300k where blocks have 2-4k outputs).
+#[cfg(feature = "production")]
+pub(crate) fn build_spec_adds(block: &Block, tx_ids: &[Hash], height: u64) -> UtxoSet {
+    let mut map = UtxoSet::default();
+    for (tx_idx, (tx, txid)) in block.transactions.iter().zip(tx_ids.iter()).enumerate() {
+        let is_coinbase = tx_idx == 0;
+        for (out_idx, output) in tx.outputs.iter().enumerate() {
+            let op = blvm_protocol::OutPoint {
+                hash: *txid,
+                index: out_idx as u32,
+            };
+            let utxo = UTXO {
+                value: output.value,
+                script_pubkey: output.script_pubkey.as_slice().into(),
+                height,
+                is_coinbase,
+            };
+            map.insert(op, Arc::new(utxo));
+        }
+    }
+    map
+}
+
+/// Run a single prefetch worker. Receives work items, builds UTXO map, sends to ready queue
+/// **via `OrderedReadyBridge`** so heights reach the feeder in strict ascending order even when
+/// parallel workers complete out of order. Without the bridge the feeder can land N+1 before N
+/// and the validation cursor stalls (min_buffered_height > next_validation_height).
+///
 /// Logs [PREFETCH_PERF] aggregate stats every 5000 blocks to track disk latency evolution.
 #[cfg(feature = "production")]
 pub(crate) fn run_prefetch_worker(
     rx: Receiver<PrefetchWorkItemV2>,
-    tx: Sender<ReadyItem>,
+    bridge: Arc<OrderedReadyBridge>,
     store: Arc<IbdUtxoStore>,
 ) {
+    let _ = store; // store handed to closures via the work item; kept on signature for future reuse
     let mut local_blocks: u64 = 0;
     while let Ok((s, keys, tx_ids, h, block, witnesses)) = rx.recv() {
         let full_map = prefetch_build_utxo_map(&s, &keys);
-        let _ = tx.send((h, block, witnesses, keys, full_map, tx_ids));
+        // Build spec_adds on this worker thread (was on the dispatcher; see `build_spec_adds`).
+        let spec_adds = Arc::new(build_spec_adds(&block, &tx_ids, h));
+        let item: ReadyItem = (h, block, witnesses, keys, full_map, tx_ids, spec_adds);
+        bridge.worker_complete(h, item);
         local_blocks += 1;
         // Log aggregate stats every 5000 blocks processed by this worker.
         if local_blocks % 5_000 == 0 {

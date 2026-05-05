@@ -85,7 +85,7 @@ impl ModuleDiscovery {
                                 "Manifest validation failed for module {}: {:?}",
                                 manifest.name, errors
                             );
-                            // Continue anyway in Phase 1, but log warning
+                            // Discovery stays permissive: log and still surface the module.
                         }
                     }
 
@@ -208,8 +208,8 @@ impl ModuleDiscovery {
                     "Manifest validation failed for module {}: {:?}",
                     module_name, errors
                 );
-                // Continue anyway in Phase 1, but log warning
-                // In Phase 2+, we would reject invalid manifests
+                // Discovery stays permissive: log and still load the module.
+                // A stricter registry could reject invalid manifests before spawn.
             }
         }
 

@@ -1188,17 +1188,22 @@ pub mod rocksdb_impl {
             opts.set_max_open_files(max_open);
 
             // Each compaction thread holds ~64MB of input/output buffers in memory.
-            // 16 GB: 1+1=2 bg jobs to keep ~64 MB in compaction instead of ~128 MB.
+            // 16 GB: 3 compactors keep up with IBD's UTXO write bursts (~50k ops/flush * heights/sec)
+            // without falling behind into L0 stalls; ~3*64=192 MB compaction RSS is tolerable.
             let default_compactions = if total_ram_gb >= 32 {
                 4
             } else if total_ram_gb >= 24 {
-                2
+                3
+            } else if total_ram_gb >= 16 {
+                3
             } else {
                 1
             };
             let default_flushes = if total_ram_gb >= 32 {
                 4
             } else if total_ram_gb >= 24 {
+                2
+            } else if total_ram_gb >= 16 {
                 2
             } else {
                 1
@@ -1252,23 +1257,44 @@ pub mod rocksdb_impl {
                     }
                 }
             }
+
+            // Direct I/O for compaction reads/writes: keeps the OS page cache hot for the
+            // validation/prefetch read path. Without this, RocksDB's compaction (~3 threads
+            // pushing 100s of MB/s) evicts our hot UTXO blocks from the page cache, forcing
+            // every subsequent read back through SSD. Compaction itself reads sequentially
+            // and benefits from explicit readahead instead of the page cache. Default off
+            // because some filesystems / older kernels don't support O_DIRECT.
+            let direct_io_compaction = std::env::var("BLVM_ROCKSDB_DIRECT_IO_COMPACTION")
+                .ok()
+                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                .unwrap_or(true);
+            if direct_io_compaction {
+                opts.set_use_direct_io_for_flush_and_compaction(true);
+                // 2 MiB readahead matches the SST block-group size for sequential compaction reads.
+                opts.set_compaction_readahead_size(2 * 1024 * 1024);
+                tracing::info!(
+                    "[ROCKSDB] direct I/O for flush+compaction enabled (preserves page cache for reads)"
+                );
+            }
             let default_write_buffer = if total_ram_gb >= 32 {
                 256
             } else if total_ram_gb >= 24 {
                 192
             } else if total_ram_gb >= 16 {
-                16
+                64
             } else {
-                8
+                16
             };
             let default_block_cache = if total_ram_gb >= 32 {
-                512
+                768
             } else if total_ram_gb >= 24 {
-                384
+                512
             } else if total_ram_gb >= 16 {
-                32
+                // Reduced from 384 MB: shared block cache is only used for blocks/headers/witnesses
+                // CFs, not for UTXOs (which have a dedicated cache). 192 MB is ample for those CFs.
+                192
             } else {
-                16
+                32
             };
 
             // Precedence: config > ENV > default
@@ -1312,14 +1338,22 @@ pub mod rocksdb_impl {
 
             // WriteBufferManager: hard cap on total memtable memory across ALL CFs.
             // allow_stall=true blocks writes instead of exceeding the cap.
+            //
+            // 16 GB tier sized for the `ibd_utxos` memtables (write_buffer=96 MB,
+            // max_write_buffer_number=3 → up to 288 MB peak for ibd_utxos) plus the
+            // persistent `utxos` CF (~128 MB peak) plus bulk CFs. 512 MB total leaves
+            // room without pushing process RSS into swap territory.
             let wbm_mb: usize = if total_ram_gb >= 32 {
-                512
+                1280
             } else if total_ram_gb >= 24 {
-                384
+                896
             } else if total_ram_gb >= 16 {
-                48
+                // Reduced from 512 MB: with smaller write_buffer (64 MB × 2 = 128 MB peak for
+                // ibd_utxos) plus the persistent utxos CF (~128 MB peak), 256 MB WBM cap leaves
+                // adequate headroom while freeing 256 MB of RSS budget vs the old 512 MB setting.
+                256
             } else {
-                32
+                48
             };
             let wbm =
                 rocksdb::WriteBufferManager::new_write_buffer_manager(wbm_mb * 1024 * 1024, true);
@@ -1343,11 +1377,15 @@ pub mod rocksdb_impl {
                     if total_ram_gb >= 64 {
                         2048
                     } else if total_ram_gb >= 32 {
-                        1024
+                        1536
                     } else if total_ram_gb >= 24 {
-                        384
+                        1024
                     } else if total_ram_gb >= 16 {
-                        128
+                        // 256 MB: on 16 GB hosts RSS at h=400k+ is already 8+ GB (79% of budget).
+                        // A larger block cache would increase RSS → adaptive cap shrinks the DashMap
+                        // → net negative effect. Keep at 256 MB until RSS headroom is confirmed large
+                        // enough (e.g. on 32 GB+ hosts or at early heights before UTXO buildup).
+                        256
                     } else {
                         64
                     }
@@ -1359,7 +1397,9 @@ pub mod rocksdb_impl {
                 total_ram_gb
             );
 
-            // Per-CF options for IBD-hot column families.
+            // Per-CF options for the persistent UTXO column family (`utxos`).
+            // Used by the chainstate after IBD completes; survives long-term, so we keep
+            // moderate Zstd compression for L2+ to bound on-disk size.
             let make_utxo_cf_opts = |uc: &Cache| -> Options {
                 let mut o = Options::default();
                 let mut bbo = BlockBasedOptions::default();
@@ -1373,7 +1413,7 @@ pub mod rocksdb_impl {
                 } else if total_ram_gb >= 24 {
                     128
                 } else if total_ram_gb >= 16 {
-                    8
+                    64
                 } else {
                     4
                 };
@@ -1381,10 +1421,89 @@ pub mod rocksdb_impl {
                 o.set_max_write_buffer_number(2);
                 o.set_level_zero_file_num_compaction_trigger(12);
                 o.set_target_file_size_base(
-                    if total_ram_gb >= 32 { 128 } else { 64 } * 1024 * 1024,
+                    if total_ram_gb >= 16 { 128 } else { 64 } * 1024 * 1024,
                 );
-                o.set_compression_type(rocksdb::DBCompressionType::Zstd);
+                // L0/L1 = uncompressed: flush + L0→L1 compaction are CPU bound on Zstd
+                // during IBD (3 RocksDB threads at >90% CPU on 16 GB hosts). UTXOs entries
+                // are tiny (~80 B) so L0/L1 disk usage is bounded (a few hundred MB peak)
+                // and the OS page cache is preserved by direct I/O. L2+ stays Zstd for
+                // bottommost storage efficiency.
+                o.set_compression_per_level(&[
+                    rocksdb::DBCompressionType::None,
+                    rocksdb::DBCompressionType::None,
+                    rocksdb::DBCompressionType::Zstd,
+                    rocksdb::DBCompressionType::Zstd,
+                    rocksdb::DBCompressionType::Zstd,
+                    rocksdb::DBCompressionType::Zstd,
+                    rocksdb::DBCompressionType::Zstd,
+                ]);
                 o.set_bottommost_compression_type(rocksdb::DBCompressionType::Zstd);
+                o
+            };
+
+            // Per-CF options for the *temporary* `ibd_utxos` column family.
+            // This CF is wiped at IBD completion (see ibd_autorepair / chainstate cutover),
+            // so on-disk durability and storage efficiency don't matter — only IBD throughput.
+            //
+            // Differences vs the persistent `utxos` CF (each chosen to keep RocksDB's compaction
+            // threads off the critical path so validation workers stay fed):
+            //   • compression = None at every level (Zstd compaction CPU dominated one core
+            //     even with L0/L1 uncompressed; no point compressing data we'll throw away).
+            //   • write_buffer = 2× larger and max_write_buffer_number = 4 → more dedup of
+            //     overwrite/spend churn before flush, fewer L0 SSTs per 1k blocks.
+            //   • level0 trigger = 16 → defer L0→L1 compaction longer (we have more headroom
+            //     in the larger memtables to absorb bursts before stalling becomes a risk).
+            //   • target_file_size_base = 256 MB → fewer, larger SSTs in deeper levels means
+            //     less metadata per byte and less file-rotation overhead during compaction.
+            let make_ibd_utxo_cf_opts = |uc: &Cache| -> Options {
+                let mut o = Options::default();
+                let mut bbo = BlockBasedOptions::default();
+                // No bloom filter: with l0_trigger=16, pinning cost is 16 × ~12MB = 192MB.
+                // On 16 GB hosts with RSS already near the adaptive cap threshold at h=400k+,
+                // any additional RSS (bloom filter RAM) triggers DashMap shrinks that worsen
+                // disk read rates more than bloom filters help. Keep off until we have more RAM.
+                bbo.set_block_cache(uc);
+                // No index/filter pinning: with no bloom filters there is nothing to pin,
+                // and the data block cache is sized to handle IBD read traffic adequately.
+                o.set_block_based_table_factory(&bbo);
+                let wb = if total_ram_gb >= 32 {
+                    512
+                } else if total_ram_gb >= 24 {
+                    256
+                } else if total_ram_gb >= 16 {
+                    // 64 MB × 2 memtables = 128 MB peak. Previous 96 MB × 3 = 288 MB was
+                    // pushing RSS close to swap on 16 GB hosts. Smaller memtable means more
+                    // frequent L0 flushes but much less in-memory buffering.
+                    64
+                } else {
+                    8
+                };
+                o.set_write_buffer_size(wb * 1024 * 1024);
+                let mwb = if total_ram_gb >= 16 { 2 } else { 2 };
+                o.set_max_write_buffer_number(mwb);
+                o.set_min_write_buffer_number_to_merge(1);
+                // L0 trigger: 16 × 64 MB = 1 GB of L0 data before compaction on 16 GB hosts.
+                // Previous trigger of 64 caused a single 6.1 GB compaction burst (64 × 96 MB SSTs
+                // merged simultaneously), spiking RSS by 3.4 GB at h=254k and triggering swap.
+                // 16 files → each compaction uses ~200 MB of merge-sort RAM, no spike.
+                let l0_trigger = if total_ram_gb >= 32 { 64 } else if total_ram_gb >= 16 { 16 } else { 8 };
+                o.set_level_zero_file_num_compaction_trigger(l0_trigger);
+                // Scale slowdown/stop triggers proportionally to the new compact trigger.
+                o.set_level_zero_slowdown_writes_trigger(l0_trigger * 4);
+                o.set_level_zero_stop_writes_trigger(l0_trigger * 8);
+                o.set_target_file_size_base(
+                    if total_ram_gb >= 16 { 256 } else { 64 } * 1024 * 1024,
+                );
+                o.set_max_bytes_for_level_base(
+                    if total_ram_gb >= 16 { 1024 } else { 256 } * 1024 * 1024,
+                );
+                // No compression anywhere: this CF's lifetime is the IBD run.
+                // Compaction CPU was the dominant bottleneck (validate workers starved at
+                // ~17% CPU each because the single active rocksdb compaction thread sat at
+                // 99% CPU competing for cores). Skipping Zstd entirely on the temporary CF
+                // returns those cycles to the validate workers.
+                o.set_compression_type(rocksdb::DBCompressionType::None);
+                o.set_bottommost_compression_type(rocksdb::DBCompressionType::None);
                 o
             };
             let make_bulk_cf_opts = |cache: &Cache| -> Options {
@@ -1398,7 +1517,7 @@ pub mod rocksdb_impl {
                 } else if total_ram_gb >= 24 {
                     32
                 } else if total_ram_gb >= 16 {
-                    8
+                    32
                 } else {
                     4
                 };
@@ -1410,14 +1529,15 @@ pub mod rocksdb_impl {
             };
             let cf_opts_for = |name: &str| -> Options {
                 match name {
-                    "ibd_utxos" | "utxos" => make_utxo_cf_opts(&utxo_cache),
+                    "ibd_utxos" => make_ibd_utxo_cf_opts(&utxo_cache),
+                    "utxos" => make_utxo_cf_opts(&utxo_cache),
                     "blocks" | "headers" | "witnesses" | "height_index" => {
                         make_bulk_cf_opts(&cache)
                     }
                     _ => Options::default(),
                 }
             };
-            tracing::info!("[ROCKSDB] per-CF: ibd_utxos/utxos bloom+zstd+dedicated_cache, blocks/headers/witnesses zstd, WAL disabled for IBD");
+            tracing::info!("[ROCKSDB] per-CF: ibd_utxos=no-compression+large-memtables (temp), utxos=zstd-L2+, blocks/headers/witnesses=zstd, WAL disabled for IBD");
 
             let mut cfs = vec![ColumnFamilyDescriptor::new("default", Options::default())];
             cfs.extend(
@@ -1698,13 +1818,20 @@ pub mod rocksdb_impl {
 
         fn clear(&self) -> Result<()> {
             let cf = self.cf()?;
-            let mut iter = self.db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+            // Use a single range-delete with WAL disabled instead of iterating
+            // and writing one delete per key.  The old approach generated a 3.6 GB
+            // WAL for the ibd_utxos CF (millions of UTXO entries × ~40 B/key), which
+            // caused an OOM on the next DB::Open() when RocksDB tried to replay it.
+            // delete_range_cf is a single tombstone record; flush_cf persists it to
+            // an SST file immediately so no WAL replay is needed on next open.
             let mut batch = rocksdb::WriteBatch::default();
-            for item in iter {
-                let (key, _) = item?;
-                batch.delete_cf(cf, &key);
-            }
-            self.db.write(batch)?;
+            // Cover the full key space: empty begin key, max-length 0xFF end key.
+            batch.delete_range_cf(cf, &[] as &[u8], &[0xFFu8; 128]);
+            let mut wo = rocksdb::WriteOptions::default();
+            wo.disable_wal(true);
+            self.db.write_opt(batch, &wo)?;
+            // Flush immediately so the tombstone is durable without any WAL entry.
+            self.db.flush_cf(cf)?;
             Ok(())
         }
 

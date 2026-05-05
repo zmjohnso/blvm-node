@@ -4,6 +4,7 @@
 
 use crate::storage::database::{Database, Tree};
 use anyhow::Result;
+use blvm_muhash::MUHASH_RUNNING_STATE_BYTES;
 use blvm_protocol::{BlockHeader, Hash};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -280,6 +281,43 @@ impl ChainState {
     pub fn force_set_ibd_utxo_watermark(&self, height: u64) -> Result<()> {
         self.chain_info
             .insert(b"ibd_utxo_watermark", &height.to_be_bytes())?;
+        if height == 0 {
+            let _ = self.chain_info.remove(b"ibd_utxo_muhash_running");
+        }
+        Ok(())
+    }
+
+    /// Rolling MuHash numerator/denominator persisted alongside [`Self::persist_ibd_utxo_flush_checkpoint`].
+    pub fn get_ibd_utxo_muhash_running(&self) -> Result<Option<[u8; MUHASH_RUNNING_STATE_BYTES]>> {
+        match self.chain_info.get(b"ibd_utxo_muhash_running")? {
+            Some(data) => {
+                if data.len() != MUHASH_RUNNING_STATE_BYTES {
+                    return Ok(None);
+                }
+                let mut out = [0u8; MUHASH_RUNNING_STATE_BYTES];
+                out.copy_from_slice(&data);
+                Ok(Some(out))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Atomically persist incremental MuHash state and optionally advance `ibd_utxo_watermark`.
+    ///
+    /// Uses one `chain_info` batch so we never advance the watermark without matching MuHash bytes
+    /// (or vice versa) surviving the same WAL sync.
+    pub fn persist_ibd_utxo_flush_checkpoint(
+        &self,
+        flush_height: u64,
+        muhash_running: &[u8; MUHASH_RUNNING_STATE_BYTES],
+    ) -> Result<()> {
+        let current_wm = self.get_utxo_watermark()?.unwrap_or(0);
+        let mut batch = self.chain_info.batch()?;
+        if flush_height > current_wm {
+            batch.put(b"ibd_utxo_watermark", &flush_height.to_be_bytes());
+        }
+        batch.put(b"ibd_utxo_muhash_running", muhash_running.as_slice());
+        batch.commit()?;
         Ok(())
     }
 

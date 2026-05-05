@@ -1,4 +1,4 @@
-//! Main node run loop: block processing, network message poll, health and disk checks (§3).
+//! Main node run loop: block processing, network message poll, health and disk checks.
 
 use anyhow::Result;
 use std::sync::Arc;

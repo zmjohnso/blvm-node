@@ -194,13 +194,7 @@ impl RequestValidator {
         module_id: &str,
         operation: &str,
     ) -> Result<(), ModuleError> {
-        // In Phase 2+, we would reject any operations that could modify:
-        // - UTXO set
-        // - Block validation rules
-        // - Chain state
-        // - Mempool state (unless explicitly allowed)
-
-        // For now, all operations are read-only, so this always passes
+        // IPC paths are treated as read-only with respect to consensus; nothing here rejects yet.
         debug!(
             "Validated no consensus modification for module {} operation: {}",
             module_id, operation

@@ -137,25 +137,7 @@ async fn test_request_metrics() {
     let (id1, _rx1) = manager.register_request(peer_addr);
     manager.complete_request(id1, vec![1, 2, 3]);
 
-    // Note: get_request_metrics and record_failed_request methods don't exist yet
-    // This test is disabled until those methods are implemented
-    // Check metrics
-    // let metrics = manager.get_request_metrics(peer_addr);
-    // assert!(metrics.is_some());
-    // let m = metrics.unwrap();
-    // assert_eq!(m.total_requests, 1);
-    // assert_eq!(m.successful_responses, 1);
-    // assert_eq!(m.failed_requests, 0);
-
-    // Record a failure
-    // let (id2, _rx2) = manager.register_request(peer_addr);
-    // manager.record_failed_request(id2);
-
-    // let metrics = manager.get_request_metrics(peer_addr);
-    // let m = metrics.unwrap();
-    // assert_eq!(m.total_requests, 2);
-    // assert_eq!(m.successful_responses, 1);
-    // assert_eq!(m.failed_requests, 1);
+    // Smoke test: register + complete only. Per-peer metrics helpers are not on NetworkManager yet.
 }
 
 #[tokio::test(flavor = "multi_thread")]

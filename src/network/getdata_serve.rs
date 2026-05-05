@@ -7,7 +7,7 @@
 //! Block hashes merged via [`crate::module::traits::NodeAPI::merge_block_serve_denylist`]
 //! (e.g. selective-sync or policy modules) are never served as full `block` messages.
 
-use crate::network::inventory::{MSG_BLOCK, MSG_TX};
+use crate::network::inventory::{MSG_BLOCK, MSG_TX, MSG_WITNESS_BLOCK};
 use crate::network::network_manager::NetworkManager;
 use crate::network::protocol::{
     BlockMessage, GetDataMessage, InventoryVector, NotFoundMessage, ProtocolMessage,
@@ -49,7 +49,7 @@ impl NetworkManager {
 
         for item in &getdata.inventory {
             match item.inv_type {
-                MSG_BLOCK => {
+                MSG_BLOCK | MSG_WITNESS_BLOCK => {
                     let res = if self.block_serve_maintenance_mode()
                         || self.is_block_serve_denied(&item.hash)
                     {

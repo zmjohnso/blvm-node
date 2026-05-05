@@ -137,7 +137,7 @@ impl ModuleProcessSpawner {
                     "Failed to apply resource limits to module {}: {}",
                     module_name, e
                 );
-                // Continue anyway - limits will be enforced in Phase 2+
+                // Continue — module process is already running; limits may be partially unset.
             }
         }
 

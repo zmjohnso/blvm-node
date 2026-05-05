@@ -32,8 +32,12 @@
 use crate::storage::database::Tree;
 use anyhow::Result;
 
-/// TidesDB max ops per transaction (TDB_MAX_TXN_OPS=100000). Batch splitting safety limit.
-pub(crate) const MAX_BATCH_OPS: usize = 50_000;
+/// Historical name (TidesDB had `TDB_MAX_TXN_OPS=100000`). On RocksDB this is a safety cap
+/// that splits a `flush_batch_to_disk` into multiple `WriteBatch::commit()`s when the retire
+/// hot path emits a very large pending package. Each `commit()` has a fixed cost (atomic
+/// sequence + memtable lock + WAL fsync if enabled) so larger chunks = fewer RocksDB write
+/// barriers. Aligned with `TIDESDB_MAX_TXN_OPS` (200k) so a 200k-op flush is one batch.
+pub(crate) const MAX_BATCH_OPS: usize = 200_000;
 
 /// Don't evict outputs created in the last N blocks (likely to be spent soon).
 const EVICT_MIN_AGE_BLOCKS: u64 = 100;
@@ -95,29 +99,18 @@ pub(crate) fn load_keys_from_disk(
     }
     let values = disk.get_many(&key_refs)?;
     let mut result = FxHashMap::with_capacity_and_hasher(keys.len(), Default::default());
-    #[cfg(feature = "rayon")]
-    {
-        use blvm_protocol::rayon::prelude::*;
-        let rows: Vec<(OutPointKey, Option<Vec<u8>>)> = keys.iter().copied().zip(values).collect();
-        for (k, utxo) in rows
-            .into_par_iter()
-            .filter_map(|(key, value)| {
-                let data = value?;
-                let utxo = bincode::deserialize::<UTXO>(&data).ok()?;
-                Some((key, utxo))
-            })
-            .collect::<Vec<_>>()
-        {
-            result.insert(k, utxo);
-        }
-    }
-    #[cfg(not(feature = "rayon"))]
-    {
-        for (key, value) in keys.iter().zip(values.into_iter()) {
-            if let Some(data) = value {
-                if let Ok(utxo) = bincode::deserialize::<UTXO>(&data) {
-                    result.insert(*key, utxo);
-                }
+    // Serial deserialize: par_iter here was harmful in the IBD hot path. With N validation
+    // workers each calling supplement_utxo_map_with_buf concurrently, every worker dispatched
+    // its disk-load deserialization onto the same global rayon pool. 8 par_iters competing
+    // for 11 rayon threads thrashed the pool with split/join overhead while the validation
+    // workers themselves blocked on the rayon barrier. Typical cache-miss batches are 10–500
+    // UTXOs, deserializing in <500µs serially — well under par_iter's coordination overhead.
+    // Keeping this serial frees the rayon pool for genuinely block-level parallel work and
+    // lets validation workers achieve true N-way parallelism.
+    for (key, value) in keys.iter().zip(values.into_iter()) {
+        if let Some(data) = value {
+            if let Ok(utxo) = bincode::deserialize::<UTXO>(&data) {
+                result.insert(*key, utxo);
             }
         }
     }

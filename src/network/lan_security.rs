@@ -906,7 +906,7 @@ impl DiscoveryVerifier {
         >,
         timeouts: Option<(Duration, Duration)>,
     ) -> (bool, String) {
-        // Step 1: Protocol handshake
+        // Protocol handshake with peer.
         info!(
             "Verifying discovered LAN peer {} - protocol handshake...",
             addr
@@ -936,7 +936,7 @@ impl DiscoveryVerifier {
             }
         };
 
-        // Step 2: Headers verification (only if we have an internet tip)
+        // Headers consistency check when we have an internet tip to compare against.
         let internet_tip = match self.get_internet_tip() {
             Some(tip) => tip,
             None => {

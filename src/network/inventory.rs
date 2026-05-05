@@ -14,6 +14,10 @@ pub const MSG_TX: u32 = 1;
 pub const MSG_BLOCK: u32 = 2;
 pub const MSG_FILTERED_BLOCK: u32 = 3;
 pub const MSG_CMPCT_BLOCK: u32 = 4;
+/// Request block with full SegWit witness data (BIP144). Use instead of MSG_BLOCK for heights
+/// at or after SegWit activation (481824 mainnet) to ensure witness data is included in the
+/// peer's response. Peers that don't support SegWit respond with MSG_BLOCK format (harmless).
+pub const MSG_WITNESS_BLOCK: u32 = 0x40000002;
 
 /// Inventory manager
 pub struct InventoryManager {

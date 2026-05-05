@@ -1107,7 +1107,7 @@ impl EventPublisher {
         }
     }
 
-    // === §6.4 New Event Types ===
+    // === Extended module / mining events ===
 
     /// Publish selective sync policy applied event
     pub async fn publish_selective_sync_policy_applied(

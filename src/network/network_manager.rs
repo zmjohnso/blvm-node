@@ -1,7 +1,4 @@
-//! Network manager: coordinates all network operations.
-//!
-//! Supports multiple transports (TCP, Quinn, Iroh) based on configuration.
-//! Extracted from network/mod.rs for Phase 1 of complexity remediation.
+//! Network manager: coordinates peers, transports (TCP, Quinn, Iroh), and network-facing state.
 
 use crate::network::protocol::cmd;
 use crate::network::protocol::{AddrMessage, NetworkAddress, ProtocolMessage, ProtocolParser};

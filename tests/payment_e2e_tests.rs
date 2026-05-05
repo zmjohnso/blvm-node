@@ -53,7 +53,7 @@ async fn test_vault_complete_lifecycle() {
     let deposit_amount = 100000;
     let withdrawal_script = vec![0x51, 0x87]; // OP_1, OP_EQUAL
 
-    // Step 1: Create vault
+    // Create vault
     let vault_state = vault_engine
         .create_vault(
             vault_id,
@@ -74,7 +74,7 @@ async fn test_vault_complete_lifecycle() {
         blvm_node::payment::vault::VaultLifecycle::Deposited
     );
 
-    // Step 2: Unvault
+    // Unvault
     let unvault_script = vec![0x52, 0x87]; // OP_2, OP_EQUAL
     let unvaulted_state = vault_engine
         .unvault(&vault_state, unvault_script)
@@ -85,7 +85,7 @@ async fn test_vault_complete_lifecycle() {
         blvm_node::payment::vault::VaultLifecycle::Unvaulting
     );
 
-    // Step 3: Mark as unvaulted (simulating on-chain confirmation)
+    // Simulate on-chain confirmation of unvault
     let unvault_tx_hash = [0x01; 32];
     let unvault_block_height = 1000;
     let unvaulted_state = vault_engine
@@ -97,7 +97,7 @@ async fn test_vault_complete_lifecycle() {
         blvm_node::payment::vault::VaultLifecycle::Unvaulted { .. }
     ));
 
-    // Step 4: Withdraw (after delay)
+    // Withdraw after delay
     let current_block_height = unvault_block_height + 145; // After delay
     let final_withdrawal_script = vec![0x53, 0x87]; // OP_3, OP_EQUAL
     let withdrawn_state = vault_engine
@@ -166,7 +166,7 @@ async fn test_pool_complete_workflow() {
 
     let pool_id = "e2e_pool_1";
 
-    // Step 1: Create pool with initial participants
+    // Create pool with initial participants
     let initial_participants = vec![
         ("participant_1".to_string(), 10000, vec![0x51, 0x87]),
         ("participant_2".to_string(), 20000, vec![0x52, 0x87]),
@@ -184,7 +184,7 @@ async fn test_pool_complete_workflow() {
     assert_eq!(pool_state.total_balance, 30000);
     assert_eq!(pool_state.participants.len(), 2);
 
-    // Step 2: Join pool
+    // Join pool
     let new_participant_id = "participant_3";
     let contribution = 15000;
     let script_pubkey = vec![0x53, 0x87];
@@ -196,7 +196,7 @@ async fn test_pool_complete_workflow() {
     assert_eq!(pool_state.participants.len(), 3);
     assert_eq!(pool_state.total_balance, 45000);
 
-    // Step 3: Distribute from pool
+    // Distribute from pool
     let distribution = vec![
         ("participant_1".to_string(), 5000),
         ("participant_2".to_string(), 10000),
@@ -258,7 +258,7 @@ async fn test_congestion_complete_workflow() {
     let batch_id = "e2e_batch_1";
     let target_fee_rate = 10;
 
-    // Step 1: Create batch
+    // Create batch
     let mut manager = congestion_manager.lock().await;
     let created_id = manager.create_batch(batch_id, Some(target_fee_rate));
     assert_eq!(created_id, batch_id);
@@ -267,7 +267,7 @@ async fn test_congestion_complete_workflow() {
     assert_eq!(batch.target_fee_rate, target_fee_rate);
     assert_eq!(batch.transactions.len(), 0);
 
-    // Step 2: Add transactions to batch
+    // Add transactions to batch
     let tx1 = blvm_node::payment::congestion::PendingTransaction {
         tx_id: "tx_1".to_string(),
         outputs: vec![blvm_protocol::payment::PaymentOutput {
@@ -289,7 +289,7 @@ async fn test_congestion_complete_workflow() {
     let batch = manager.get_batch(batch_id).expect("Batch should exist");
     assert_eq!(batch.transactions.len(), 1);
 
-    // Step 3: Broadcast batch (requires covenant)
+    // Broadcast batch (covenant path may succeed or fail depending on readiness)
     // Note: For a single transaction, we need to manually trigger covenant update
     // In real scenario, this happens when batch reaches max size
     let result = manager.broadcast_batch(batch_id);

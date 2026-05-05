@@ -29,14 +29,12 @@
 #![allow(clippy::arc_with_non_send_sync)] // ZMQ Socket is not Sync; zmq crate limitation
 #![allow(clippy::field_reassign_with_default)] // Many config structs; init would be verbose
 #![allow(clippy::collapsible_match)] // Readability preference for nested matches
-#![allow(unused_doc_comments, unused_imports, unused_variables, unused_mut)] // Many feature-gated paths; fix in follow-up
-                                                                             // Memory allocator optimization using mimalloc (faster than default allocator)
-                                                                             // Note: Only in blvm-node, not blvm-consensus
-                                                                             // Disabled for Windows cross-compilation (mimalloc linking issues with MinGW)
-                                                                             // Temporarily disabled for IBD memory profiling — mimalloc arenas
-                                                                             // retain freed pages and inflate RSS on 16GB boxes.
-                                                                             // Use the default Rust allocator in `cargo test` — mimalloc has caused SIGSEGV in
-                                                                             // integration tests (UTXO Merkle / handler paths) while the same code passes under the
+#![allow(unused_doc_comments, unused_imports, unused_variables, unused_mut)] // Feature-gated modules, optional deps, and cfg-heavy paths
+                                                                             // Memory allocator: mimalloc when enabled (see #[cfg] below).
+                                                                             // Note: only in blvm-node, not blvm-consensus.
+                                                                             // Disabled on Windows (MinGW mimalloc link issues).
+                                                                             // `cargo test` uses the default allocator: mimalloc arenas can retain RSS during heavy
+                                                                             // IBD, and some integration tests have faulted under mimalloc while passing with the
                                                                              // system allocator and in `blvm-protocol` tests.
 #[cfg(all(not(target_os = "windows"), feature = "mimalloc", not(test)))]
 #[global_allocator]

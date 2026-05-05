@@ -369,11 +369,8 @@ mod tests {
         }
     }
 
-    // NOTE: test_handle_incoming_wire_tcp_enqueues_pkgtxn was removed because it hangs
-    // Note: All Mutex usage is now tokio::sync::Mutex with async-safe .await calls.
-    // The handle_incoming_wire_tcp function uses async-safe track_bytes_received
-    // and is_banned) which blocks the async runtime when there's contention.
-    // Full message routing is tested in integration tests.
+    // NOTE: `test_handle_incoming_wire_tcp_enqueues_pkgtxn` was removed — it hung under async
+    // mutex contention on `handle_incoming_wire_tcp`. Full routing is covered by integration tests.
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_network_manager_peer_manager_access() {

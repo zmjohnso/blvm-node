@@ -302,7 +302,7 @@ fn test_validate_module_signature() {
     let manifest = create_valid_manifest();
     let binary_path = PathBuf::from("/nonexistent/binary.so");
 
-    // Phase 1: Signature validation is disabled (always succeeds)
+    // Signature verification is currently a no-op (see `validate_module_signature`).
     let result = validate_module_signature(&manifest, &binary_path);
     assert!(result.is_ok());
 }

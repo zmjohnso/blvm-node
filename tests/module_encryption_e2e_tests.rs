@@ -129,7 +129,7 @@ async fn test_full_encrypted_module_purchase_flow() {
     let modules_dir = temp_dir.path().join("modules");
     std::fs::create_dir_all(&modules_dir).unwrap();
 
-    // Step 1: Setup
+    // Setup
     let module_name = "test-module";
     let module_binary = b"original_module_binary_data";
     let registry = create_test_registry(&temp_dir, module_name, module_binary).await;
@@ -145,7 +145,7 @@ async fn test_full_encrypted_module_purchase_flow() {
     let processor_arc = Arc::new(processor);
     let state_machine = Arc::new(PaymentStateMachine::new(Arc::clone(&processor_arc)));
 
-    // Step 2: Create payment request
+    // Create payment request
     let module_hash = {
         let hash = Sha256::digest(module_binary);
         let mut h = [0u8; 32];
@@ -171,12 +171,12 @@ async fn test_full_encrypted_module_purchase_flow() {
     assert_eq!(metadata["module_name"], module_name);
     assert_eq!(metadata["payment_type"], "module_payment");
 
-    // Step 3: Generate payment_id
+    // Derive payment_id from serialized request
     let serialized = bincode::serialize(&payment_request).unwrap_or_default();
     let hash = Sha256::digest(&serialized);
     let payment_id = hex::encode(&hash[..16]);
 
-    // Step 4: Submit payment (should trigger encryption)
+    // Submit payment (triggers encryption when path exercises it)
     let mut payment = Payment::new(vec![vec![0x01, 0x00, 0x00, 0x00]]); // Minimal valid tx
     payment.merchant_data = payment_request.payment_details.merchant_data.clone();
 
@@ -185,7 +185,7 @@ async fn test_full_encrypted_module_purchase_flow() {
         .process_payment(payment, payment_id.clone(), None)
         .await;
 
-    // Step 5: Verify module was encrypted
+    // Encrypted artifact under modules_dir/encrypted when present
     let encrypted_path = modules_dir.join("encrypted").join(module_name);
     if encrypted_path.exists() {
         let (encrypted_binary, metadata) = load_encrypted_module(&modules_dir, module_name)
@@ -196,7 +196,7 @@ async fn test_full_encrypted_module_purchase_flow() {
         assert!(!encrypted_binary.is_empty());
         assert_ne!(encrypted_binary, module_binary);
 
-        // Step 6: Confirm payment (mark as settled)
+        // Mark payment settled on-chain (simulated)
         use blvm_node::Hash;
         let tx_hash = [0x01u8; 32];
         let block_hash = [0x02u8; 32];
@@ -205,7 +205,7 @@ async fn test_full_encrypted_module_purchase_flow() {
             .await
             .unwrap();
 
-        // Step 7: Verify payment state
+        // Payment state should be settled
         let state = state_machine.get_payment_state(&payment_id).await.unwrap();
         match state {
             PaymentState::Settled { .. } => {
@@ -216,7 +216,7 @@ async fn test_full_encrypted_module_purchase_flow() {
             _ => panic!("Payment should be settled"),
         }
 
-        // Step 8: Verify decryption works
+        // Round-trip decrypt matches original binary
         let decrypted = encryption
             .decrypt_module(
                 &encrypted_binary,

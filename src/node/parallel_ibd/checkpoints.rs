@@ -1,6 +1,5 @@
 //! Bitcoin mainnet checkpoints for parallel header download.
 //!
-//! Extracted from parallel_ibd/mod.rs for Phase 2 of complexity remediation.
 
 use blvm_protocol::GENESIS_BLOCK_HASH_INTERNAL;
 

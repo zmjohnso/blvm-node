@@ -736,19 +736,60 @@ impl Node {
         let (synced_tip, ibd_first_block_height) = match self.storage.chain().get_height() {
             Ok(None) => (0u64, 0u64), // fresh DB — start from genesis
             Ok(Some(chain_tip)) => {
-                let watermark = self
-                    .storage
-                    .chain()
-                    .get_utxo_watermark()
-                    .ok()
-                    .flatten()
-                    .unwrap_or(0);
-                let effective_tip = chain_tip.min(watermark);
+                let watermark_val = match self.storage.chain().get_utxo_watermark() {
+                    Ok(Some(w)) => w,
+                    Ok(None) => {
+                        if chain_tip > 0 {
+                            warn!(
+                                "[START_COMPONENTS] Missing ibd_utxo_watermark with chain_tip={} — \
+                                 resume baseline is genesis until watermarks persist (expensive replay). \
+                                 Current builds persist ibd_utxo_watermark after each durable flush.",
+                                chain_tip
+                            );
+                        }
+                        0
+                    }
+                    Err(e) => {
+                        warn!(
+                            "[START_COMPONENTS] get_utxo_watermark failed ({}); assuming 0",
+                            e
+                        );
+                        0
+                    }
+                };
+                #[cfg(feature = "production")]
+                let watermark_val = match crate::storage::ibd_autorepair::reconcile_ibd_utxo_watermark_with_disk(
+                    self.storage.as_ref(),
+                    watermark_val,
+                ) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        warn!(
+                            "[START_COMPONENTS] reconcile_ibd_utxo_watermark_with_disk failed ({}); using disk watermark as read",
+                            e
+                        );
+                        watermark_val
+                    }
+                };
+
+                #[cfg(feature = "production")]
+                if watermark_val > 0 {
+                    if std::env::var("BLVM_VERIFY_IBD_UTXO_MUHASH")
+                        .map(|v| v == "1")
+                        .unwrap_or(false)
+                    {
+                        crate::storage::ibd_utxo_muhash::verify_ibd_utxo_muhash_startup(
+                            self.storage.as_ref(),
+                        )?;
+                    }
+                }
+
+                let effective_tip = chain_tip.min(watermark_val);
                 if effective_tip < chain_tip {
                     warn!(
                         "[START_COMPONENTS] UTXO watermark ({}) < chain tip ({}); \
                          IBD will re-validate {} block(s) from height {} to restore UTXO consistency",
-                        watermark,
+                        watermark_val,
                         chain_tip,
                         chain_tip - effective_tip,
                         effective_tip + 1,

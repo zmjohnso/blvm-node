@@ -100,7 +100,7 @@ pub(crate) fn run_feeder_thread(
     feeder_buffer_bytes_limit: usize,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        while let Ok((h, b, w, keys, u, tx_ids)) = ready_rx.recv() {
+        while let Ok((h, b, w, keys, u, tx_ids, spec_adds)) = ready_rx.recv() {
             let est_bytes = estimate_block_bytes(&b, &w);
             let mut guard = feeder_state.0.lock();
             while (guard.0.len() >= feeder_buffer_limit
@@ -115,7 +115,7 @@ pub(crate) fn run_feeder_thread(
             let buffer_was_empty = guard.0.is_empty();
             guard
                 .0
-                .insert(h, (Arc::new(b), w, keys, u, tx_ids, est_bytes));
+                .insert(h, (Arc::new(b), w, keys, u, tx_ids, spec_adds, est_bytes));
             guard.2 += est_bytes;
             #[cfg(feature = "profile")]
             if buffer_was_empty {

@@ -20,6 +20,8 @@ mod memory;
 mod prefetch;
 mod types;
 #[cfg(feature = "production")]
+mod ibd_staging;
+#[cfg(feature = "production")]
 mod validation_loop;
 
 use chunk_assigner::{create_chunks as create_chunks_impl, ChunkAssigner, ChunkGuard};
@@ -32,7 +34,6 @@ use memory::{MemoryGuard, TIDESDB_MAX_TXN_OPS};
 use types::PrefetchWorkItemV2;
 use types::{estimate_block_bytes, ChunkWorkItem, FeederBufferValue, ReadyItem};
 
-use crate::network::inventory::MSG_BLOCK;
 use crate::network::peer_scoring::is_lan_peer;
 use crate::network::protocol::{
     GetHeadersMessage, HeadersMessage, ProtocolMessage, ProtocolParser,
@@ -249,7 +250,10 @@ struct BlockRequest {
 pub struct ParallelIBD {
     config: ParallelIBDConfig,
     /// Earliest BIP54 activation height from version-bits lock-in along the validated chain (mainnet).
-    bip54_activation_from_version_bits: parking_lot::Mutex<Option<u64>>,
+    /// Lock-free: `u64::MAX` sentinel = `None`. The merge semantics (`min` of present values) are
+    /// expressible as a lock-free `fetch_min`, eliminating the per-block parking_lot::Mutex
+    /// contention that previously serialized 8 validation workers through this code path.
+    bip54_activation_from_version_bits: std::sync::atomic::AtomicU64,
     /// Semaphore to limit concurrent chunk downloads per peer
     peer_semaphores: Arc<HashMap<String, Arc<Semaphore>>>,
     /// Core-style: max blocks in flight per peer (shared across all workers). Prevents 6 workers × 64 pipeline = 384 requests to one peer.
@@ -263,7 +267,7 @@ impl ParallelIBD {
     pub fn new(config: ParallelIBDConfig) -> Self {
         Self {
             config,
-            bip54_activation_from_version_bits: parking_lot::Mutex::new(None),
+            bip54_activation_from_version_bits: std::sync::atomic::AtomicU64::new(u64::MAX),
             peer_semaphores: Arc::new(HashMap::new()),
             peer_blocks_semaphores: Arc::new(HashMap::new()),
             peer_scorer: Arc::new(crate::network::peer_scoring::PeerScorer::new()),
@@ -341,8 +345,7 @@ impl ParallelIBD {
 
         let headers_start = std::time::Instant::now();
 
-        // Step 1: Download headers first (sequential, but fast)
-        // This will iteratively download headers until chain tip is reached
+        // Download headers first (sequential, but fast); iterate until chain tip.
         if let Some(ref ep) = event_publisher {
             ep.publish_headers_sync_started(start_height).await;
         }
@@ -385,8 +388,7 @@ impl ParallelIBD {
             return Ok(());
         }
 
-        // Step 2: Filter out extremely slow peers (>90s average latency)
-        // Keep at least 2 peers even if all are slow
+        // Drop extremely slow peers (>90s average latency); keep at least two peers when possible.
         const MAX_ACCEPTABLE_LATENCY_MS: f64 = 90_000.0; // 90 seconds
         let filtered_peers: Vec<String> = if peer_ids.len() > 2 {
             let mut scored_peers: Vec<(String, f64)> = peer_ids
@@ -516,7 +518,7 @@ impl ParallelIBD {
             }
         }
 
-        // Step 3: Split into chunks and assign to peers (weighted by speed)
+        // Split the height range into chunks and assign peers (weighted by speed).
         // BLVM_IBD_EARLIEST_FIRST=1: assign all chunks to fastest peer (Core-like, avoids chunk-boundary stalls)
         let scored_peers: Vec<(String, f64)> = filtered_peers
             .iter()
@@ -562,7 +564,7 @@ impl ParallelIBD {
                 .await;
         }
 
-        // Step 3: Streaming download + validation
+        // Streaming block download + validation pipeline
         //
         // Bounded channel from download workers → coordinator: **required** for RAM safety.
         // Unbounded `mpsc` let WAN workers flood full blocks while the coordinator was busy,
@@ -583,7 +585,7 @@ impl ParallelIBD {
 
         // Auto-tune memory **before** allocating download queue (capacity uses buffer_limit).
         let mut mem_guard = MemoryGuard::new();
-        // Bounded download→coordinator queue + safety valve (see docs/IBD_AGENT_HANDOFF §2.4):
+        // Bounded download→coordinator queue + safety valve:
         // 1) Tokio bounded channel → backpressure when coordinator is slow (workers await send).
         // 2) RAM-tier ceiling → cap autosize so high worker×pipeline estimates do not create a
         //    huge queued-block arena on ≤16/32 GiB hosts.
@@ -598,14 +600,17 @@ impl ParallelIBD {
             let h = pipeline.clamp(1, PIPELINE_HORIZON_FOR_CAP);
             let base = bl.saturating_mul(4);
             let parallel = total_download_workers.saturating_mul(h).saturating_mul(2);
-            let floor = if mem_guard.system_total_ram_mb() <= 16 * 1024 {
+            let floor = if mem_guard.system_total_ram_mb()
+                <= memory::MemoryGuard::EXTENDED_SIXTEEN_CLASS_MB
+            {
                 128
             } else {
                 256
             };
             let raw = base.max(parallel).clamp(floor, 8192);
             let ram_ceiling = match mem_guard.system_total_ram_mb() {
-                m if m <= 16 * 1024 => 2048,
+                // ≤~18 GiB physical — worst‑case queued blocks RAM (aligned with MemoryGuard tiers).
+                m if m <= memory::MemoryGuard::EXTENDED_SIXTEEN_CLASS_MB => 1024,
                 m if m <= 32 * 1024 => 4096,
                 _ => 8192,
             };
@@ -724,7 +729,7 @@ impl ParallelIBD {
             (n.saturating_mul(2)).clamp(4, 24)
         });
         let gap_fill_workers: usize = prefetch_workers;
-        let (prefetch_input_tx_v2, gap_fill_tx_v2, ready_tx_for_coord, ready_rx) = {
+        let (prefetch_input_tx_v2, gap_fill_tx_v2, ready_bridge, ready_rx) = {
             let store = Arc::clone(&ibd_store_v2);
             let (in_tx, in_rx) =
                 crossbeam_channel::bounded::<PrefetchWorkItemV2>(max_prefetches_in_flight);
@@ -732,29 +737,33 @@ impl ParallelIBD {
                 crossbeam_channel::bounded::<PrefetchWorkItemV2>(gap_fill_workers * 4);
             let (out_tx, out_rx) =
                 crossbeam_channel::bounded::<ReadyItem>(max_prefetches_in_flight);
+            // OrderedReadyBridge wraps `out_tx`. Parallel prefetch workers complete out of order;
+            // the bridge buffers completions and only releases heights in strict ascending order
+            // so the feeder/validation cursor never stalls on a future height.
+            let bridge = Arc::new(prefetch::OrderedReadyBridge::new(out_tx));
             for _ in 0..prefetch_workers {
                 let rx_clone = in_rx.clone();
-                let tx_clone = out_tx.clone();
+                let bridge_clone = Arc::clone(&bridge);
                 let store = Arc::clone(&store);
                 std::thread::spawn(move || {
-                    prefetch::run_prefetch_worker(rx_clone, tx_clone, store)
+                    prefetch::run_prefetch_worker(rx_clone, bridge_clone, store)
                 });
             }
             for _ in 0..gap_fill_workers {
                 let rx_clone = gap_rx_v2.clone();
-                let tx_clone = out_tx.clone();
+                let bridge_clone = Arc::clone(&bridge);
                 let store = Arc::clone(&store);
                 std::thread::spawn(move || {
-                    prefetch::run_prefetch_worker(rx_clone, tx_clone, store)
+                    prefetch::run_prefetch_worker(rx_clone, bridge_clone, store)
                 });
             }
             info!(
-                "IBD v2 prefetch: {} workers, queue={}; gap-fill overflow: {} workers (direct to feeder)",
+                "IBD v2 prefetch: {} workers, queue={}; gap-fill overflow: {} workers",
                 prefetch_workers,
                 max_prefetches_in_flight,
                 gap_fill_workers
             );
-            (in_tx, gap_tx_v2, out_tx, out_rx)
+            (in_tx, gap_tx_v2, bridge, out_rx)
         };
 
         info!(
@@ -855,20 +864,45 @@ impl ParallelIBD {
                         } else {
                             peer_blocks_semaphores_clone.get(&peer_id).cloned()
                         };
-                        let dl_result = download_chunk(
-                            start,
-                            end,
-                            &peer_id,
-                            network_clone.clone(),
-                            &blockstore_clone,
-                            &config,
-                            peer_scorer_clone.clone(),
-                            Some(tx.clone()),
-                            blocks_sem,
-                            Some(&mut stall_rx),
-                            ibd_pv,
+                        // Hard outer deadline: download_chunk must complete within this window.
+                        // Protects against the initial-fill being stuck in send_block_getdata_with_retry
+                        // (up to 30 retries × 5s each = 2min) before the inner chunk_deadline is ever polled.
+                        const CHUNK_OUTER_DEADLINE_SECS: u64 = 35;
+                        let dl_result = match tokio::time::timeout(
+                            std::time::Duration::from_secs(CHUNK_OUTER_DEADLINE_SECS),
+                            download_chunk(
+                                start,
+                                end,
+                                &peer_id,
+                                network_clone.clone(),
+                                &blockstore_clone,
+                                &config,
+                                peer_scorer_clone.clone(),
+                                Some(tx.clone()),
+                                blocks_sem,
+                                Some(&mut stall_rx),
+                                ibd_pv,
+                            ),
                         )
-                        .await;
+                        .await
+                        {
+                            Ok(r) => r,
+                            Err(_elapsed) => {
+                                warn!(
+                                    "[IBD] chunk {}-{} outer deadline ({}s) expired — aborting for retry",
+                                    start, end, CHUNK_OUTER_DEADLINE_SECS
+                                );
+                                peer_scorer_clone.record_failure(
+                                    peer_id.parse::<std::net::SocketAddr>().unwrap_or_else(|_| {
+                                        "0.0.0.0:0".parse().unwrap()
+                                    }),
+                                );
+                                Err(anyhow::anyhow!(
+                                    "Chunk {}-{}: outer deadline {}s",
+                                    start, end, CHUNK_OUTER_DEADLINE_SECS
+                                ))
+                            }
+                        };
                         workers_current_clone
                             .lock()
                             .await
@@ -1003,7 +1037,15 @@ impl ParallelIBD {
         if sequential {
             info!("Coordinator: sequential mode (single peer) — passthrough, no reorder buffer");
         }
-        let ready_tx_coord = ready_tx_for_coord;
+        // The OrderedReadyBridge enforces strict-ascending delivery to the feeder. Initialize its
+        // `next_expected` to start_height so prefetch worker completions are emitted starting there.
+        // Prefetch workers complete out of order; without this seeding the first completion would
+        // set the cursor (potentially skipping ahead of `start_height`).
+        ready_bridge.coordinator_will_send_height(start_height);
+        // Bridge is now held alive by every worker thread (Arc::clone'd in the spawn loop above).
+        // The coordinator only needed it for the seeding call; subsequent dispatching goes through
+        // `prefetch_input_tx_v2` and the workers route to the bridge themselves.
+        drop(ready_bridge);
         // Create feeder_state here (before coordinator spawn) so the coordinator can hold a reference.
         // The feeder thread is spawned later but the Arc is shared; creating it early is safe.
         let feeder_state = new_feeder_state();
@@ -1019,6 +1061,39 @@ impl ParallelIBD {
             // S2: Reuse buffer for block_input_keys (avoids alloc per block)
             let mut coord_keys_buf: Vec<OutPointKey> = Vec::new();
             let mut coord_tx_ids_buf: Vec<Hash> = Vec::new();
+            // Dispatch a block to prefetch workers. The prefetch pool warm-loads input UTXOs
+            // (cache miss → RocksDB MultiGet) on N background threads before the validation
+            // worker ever sees the block — so the validation worker only has to do CPU work
+            // (script/sig/state checks) and never blocks on disk IO. Order is preserved by
+            // the OrderedReadyBridge wrapping the workers' output channel.
+            //
+            // Channel strategy: try the primary prefetch queue first; on Full, overflow to the
+            // gap-fill pool (small bounded queue with the same worker pool semantics). Both
+            // full → block on prefetch (natural backpressure to the coordinator). All sends
+            // are wrapped in `block_in_place` because crossbeam's `send` is sync-blocking and
+            // would otherwise block the tokio runtime worker.
+            let dispatch_to_prefetch = |item: (
+                Arc<IbdUtxoStore>,
+                Vec<OutPointKey>,
+                Vec<Hash>,
+                u64,
+                Block,
+                Vec<Vec<Witness>>,
+            )| {
+                tokio::task::block_in_place(|| {
+                    let item = match prefetch_input_tx_v2_for_coord.try_send(item) {
+                        Ok(()) => return,
+                        Err(crossbeam_channel::TrySendError::Full(it)) => it,
+                        Err(crossbeam_channel::TrySendError::Disconnected(_)) => return,
+                    };
+                    let item = match gap_fill_tx_v2_for_coord.try_send(item) {
+                        Ok(()) => return,
+                        Err(crossbeam_channel::TrySendError::Full(it)) => it,
+                        Err(crossbeam_channel::TrySendError::Disconnected(_)) => return,
+                    };
+                    let _ = prefetch_input_tx_v2_for_coord.send(item);
+                });
+            };
             info!("Coordinator: started, awaiting blocks from download workers");
             const COORD_STALL_LOG_SECS: u64 = 30;
             let mut coord_buffer_full_since: Option<std::time::Instant> = None;
@@ -1026,7 +1101,13 @@ impl ParallelIBD {
             let mut coord_emergency_log = std::time::Instant::now();
             loop {
                 let dynamic_buffer_limit = coord_buffer_limit;
-                // §9 L3: do not drain block_rx while validation reports Emergency — WAN workers block on send().
+                // Under Emergency memory pressure, do not drain block_rx — WAN workers block on send().
+                //
+                // Eviction is handled by the retire thread (which calls `evict_aggressive_for_rss`
+                // under PressureLevel::Emergency). Calling it from this tokio task blocks the
+                // async runtime worker for ~1 s per scan and allocates ~250 MB transient per call
+                // on a 6 M-entry cache. Trust retire to drain the cache; the coordinator only needs to back
+                // off admission and let retire catch up.
                 #[cfg(target_os = "linux")]
                 {
                     while memory::ibd_pressure_is_emergency() {
@@ -1069,62 +1150,13 @@ impl ParallelIBD {
                                 block,
                                 witnesses,
                             );
-                            let next_needed =
-                                validation_height_for_coord.load(Ordering::Relaxed) + 1;
-                            // Direct-insert window: bypass prefetch for blocks close to the
-                            // validation tip. Prefetch workers are parallel and reorder blocks
-                            // (e.g., block 600 arrives in out_rx before block 183). The feeder
-                            // reads out_rx FIFO; if it reads a future block first and blocks on
-                            // a full buffer, the critical close-range block is stuck behind it.
-                            // Direct inserting 64 blocks ahead ensures no ordering stall for the
-                            // range validation actually needs next.
-                            let route_to_gap_fill = h <= next_needed.saturating_add(64);
-                            let ptx = &prefetch_input_tx_v2_for_coord;
-                            tokio::task::block_in_place(|| {
-                                if route_to_gap_fill {
-                                    // Always insert critical blocks (h <= validation_tip+1) directly
-                                    // into the feeder buffer — never route through gap_fill workers.
-                                    // Even if gap_fill try_send would succeed, the worker can block
-                                    // on out_tx.send() downstream (ready channel full because feeder
-                                    // is on its Condvar, because validation needs THIS block).
-                                    // Direct insertion is the only path that cannot deadlock.
-                                    let (_, _, tx_ids, hb, b, w) = item;
-                                    let est_bytes = estimate_block_bytes(&b, &w);
-                                    let mut guard = feeder_state_for_coord.0.lock();
-                                    guard.0.insert(
-                                        hb,
-                                        (
-                                            Arc::new(b),
-                                            w,
-                                            Vec::new(),
-                                            rustc_hash::FxHashMap::default(),
-                                            tx_ids,
-                                            est_bytes,
-                                        ),
-                                    );
-                                    guard.2 += est_bytes;
-                                    // notify_all: both the feeder thread and the validation thread
-                                    // wait on this condvar. notify_one would risk waking the feeder
-                                    // (which checks buffer-full, finds it still full, goes back to
-                                    // sleep) instead of validation (which needs this block). With
-                                    // notify_all both wake up; validation finds and consumes the
-                                    // block, then notifies the feeder when buffer space is freed.
-                                    feeder_state_for_coord.1.notify_all();
-                                } else if let Err(e) = ptx.try_send(item) {
-                                    let back = e.into_inner();
-                                    if let Err(e2) = gap_fill_tx_v2_for_coord.try_send(back) {
-                                        let (_, _, tx_ids, hb, b, w) = e2.into_inner();
-                                        let _ = ready_tx_coord.send((
-                                            hb,
-                                            b,
-                                            w,
-                                            Vec::new(),
-                                            rustc_hash::FxHashMap::default(),
-                                            tx_ids,
-                                        ));
-                                    }
-                                }
-                            });
+                            // Hand the block to a prefetch worker. The worker warm-loads input
+                            // UTXOs from disk in parallel with validation, then routes to the
+                            // feeder via OrderedReadyBridge (height order preserved). This is
+                            // what unblocks the validation workers from doing serial RocksDB
+                            // MultiGets on their own threads — the entire reason BPS plateaus
+                            // at 80–130 in the 340k+ range with workers stuck at ~11% CPU.
+                            dispatch_to_prefetch(item);
                         }
                         if reorder_buffer.len() < dynamic_buffer_limit {
                             break;
@@ -1221,65 +1253,15 @@ impl ParallelIBD {
                                 block,
                                 witnesses,
                             );
-                            let next_needed =
-                                validation_height_for_coord.load(Ordering::Relaxed) + 1;
-                            // Direct-insert window: bypass prefetch for blocks close to the
-                            // validation tip. Prefetch workers are parallel and reorder blocks
-                            // (e.g., block 600 arrives in out_rx before block 183). The feeder
-                            // reads out_rx FIFO; if it reads a future block first and blocks on
-                            // a full buffer, the critical close-range block is stuck behind it.
-                            // Direct inserting 64 blocks ahead ensures no ordering stall for the
-                            // range validation actually needs next.
-                            let route_to_gap_fill = h <= next_needed.saturating_add(64);
-                            let ptx = &prefetch_input_tx_v2_for_coord;
-                            tokio::task::block_in_place(|| {
-                                if route_to_gap_fill {
-                                    // Always insert critical blocks (h <= validation_tip+1) directly
-                                    // into the feeder buffer — never route through gap_fill workers.
-                                    // Even if gap_fill try_send would succeed, the worker can block
-                                    // on out_tx.send() downstream (ready channel full because feeder
-                                    // is on its Condvar, because validation needs THIS block).
-                                    // Direct insertion is the only path that cannot deadlock.
-                                    let (_, _, tx_ids, hb, b, w) = item;
-                                    let est_bytes = estimate_block_bytes(&b, &w);
-                                    let mut guard = feeder_state_for_coord.0.lock();
-                                    guard.0.insert(
-                                        hb,
-                                        (
-                                            Arc::new(b),
-                                            w,
-                                            Vec::new(),
-                                            rustc_hash::FxHashMap::default(),
-                                            tx_ids,
-                                            est_bytes,
-                                        ),
-                                    );
-                                    guard.2 += est_bytes;
-                                    // notify_all: both the feeder thread and the validation thread
-                                    // wait on this condvar. notify_one would risk waking the feeder
-                                    // (which checks buffer-full, finds it still full, goes back to
-                                    // sleep) instead of validation (which needs this block). With
-                                    // notify_all both wake up; validation finds and consumes the
-                                    // block, then notifies the feeder when buffer space is freed.
-                                    feeder_state_for_coord.1.notify_all();
-                                } else if let Err(e) = ptx.try_send(item) {
-                                    let back = e.into_inner();
-                                    if let Err(e2) = gap_fill_tx_v2_for_coord.try_send(back) {
-                                        let (_, _, tx_ids, hb, b, w) = e2.into_inner();
-                                        let _ = ready_tx_coord.send((
-                                            hb,
-                                            b,
-                                            w,
-                                            Vec::new(),
-                                            rustc_hash::FxHashMap::default(),
-                                            tx_ids,
-                                        ));
-                                    }
-                                }
-                            });
+                            // Hand the block to a prefetch worker. The worker warm-loads input
+                            // UTXOs from disk in parallel with validation, then routes to the
+                            // feeder via OrderedReadyBridge (height order preserved). This is
+                            // what unblocks the validation workers from doing serial RocksDB
+                            // MultiGets on their own threads — the entire reason BPS plateaus
+                            // at 80–130 in the 340k+ range with workers stuck at ~11% CPU.
+                            dispatch_to_prefetch(item);
                         }
                     }
-                    drop(ready_tx_coord);
                     info!("Coordinator: done, sent {} blocks", total_received);
                     break;
                 }
@@ -1302,22 +1284,28 @@ impl ParallelIBD {
                             assigner_for_coord.mark_bootstrap_complete();
                             info!("IBD: bootstrap chunk 0-{} received by coordinator, parallel download enabled", h);
                         }
-                        blvm_protocol::block::compute_block_tx_ids_into(
+                        // Single-peer (sequential) path: still go through prefetch so the worker
+                        // pool warm-loads UTXOs in parallel with validation. Compute keys here
+                        // (same call the parallel path uses) so the prefetch worker has a key
+                        // list to MultiGet — sending an empty `keys` would force the validation
+                        // worker to re-derive them and fall through to a synchronous disk load.
+                        block_input_keys_and_tx_ids_filtered(
                             &block,
                             &mut coord_tx_ids_buf,
+                            &mut coord_keys_buf,
                         );
-                        // Single-peer path: no prefetch overlap; validation builds the UTXO base map
-                        // on-thread (same as a prefetch miss, but steady state at low BPS).
-                        let _ = tokio::task::block_in_place(|| {
-                            ready_tx_coord.send((
-                                h,
-                                block,
-                                witnesses,
-                                Vec::new(),
-                                rustc_hash::FxHashMap::default(),
-                                std::mem::take(&mut coord_tx_ids_buf),
-                            ))
-                        });
+                        let store = &ibd_store_v2_for_coord;
+                        let keys_owned = std::mem::take(&mut coord_keys_buf);
+                        let tx_ids_owned = std::mem::take(&mut coord_tx_ids_buf);
+                        let item = (
+                            Arc::clone(store),
+                            keys_owned,
+                            tx_ids_owned,
+                            h,
+                            block,
+                            witnesses,
+                        );
+                        dispatch_to_prefetch(item);
                         next_prefetch_height = h + 1;
                     }
                 } else {
@@ -1364,62 +1352,13 @@ impl ParallelIBD {
                                 block,
                                 witnesses,
                             );
-                            let next_needed =
-                                validation_height_for_coord.load(Ordering::Relaxed) + 1;
-                            // Direct-insert window: bypass prefetch for blocks close to the
-                            // validation tip. Prefetch workers are parallel and reorder blocks
-                            // (e.g., block 600 arrives in out_rx before block 183). The feeder
-                            // reads out_rx FIFO; if it reads a future block first and blocks on
-                            // a full buffer, the critical close-range block is stuck behind it.
-                            // Direct inserting 64 blocks ahead ensures no ordering stall for the
-                            // range validation actually needs next.
-                            let route_to_gap_fill = h <= next_needed.saturating_add(64);
-                            let ptx = &prefetch_input_tx_v2_for_coord;
-                            tokio::task::block_in_place(|| {
-                                if route_to_gap_fill {
-                                    // Always insert critical blocks (h <= validation_tip+1) directly
-                                    // into the feeder buffer — never route through gap_fill workers.
-                                    // Even if gap_fill try_send would succeed, the worker can block
-                                    // on out_tx.send() downstream (ready channel full because feeder
-                                    // is on its Condvar, because validation needs THIS block).
-                                    // Direct insertion is the only path that cannot deadlock.
-                                    let (_, _, tx_ids, hb, b, w) = item;
-                                    let est_bytes = estimate_block_bytes(&b, &w);
-                                    let mut guard = feeder_state_for_coord.0.lock();
-                                    guard.0.insert(
-                                        hb,
-                                        (
-                                            Arc::new(b),
-                                            w,
-                                            Vec::new(),
-                                            rustc_hash::FxHashMap::default(),
-                                            tx_ids,
-                                            est_bytes,
-                                        ),
-                                    );
-                                    guard.2 += est_bytes;
-                                    // notify_all: both the feeder thread and the validation thread
-                                    // wait on this condvar. notify_one would risk waking the feeder
-                                    // (which checks buffer-full, finds it still full, goes back to
-                                    // sleep) instead of validation (which needs this block). With
-                                    // notify_all both wake up; validation finds and consumes the
-                                    // block, then notifies the feeder when buffer space is freed.
-                                    feeder_state_for_coord.1.notify_all();
-                                } else if let Err(e) = ptx.try_send(item) {
-                                    let back = e.into_inner();
-                                    if let Err(e2) = gap_fill_tx_v2_for_coord.try_send(back) {
-                                        let (_, _, tx_ids, hb, b, w) = e2.into_inner();
-                                        let _ = ready_tx_coord.send((
-                                            hb,
-                                            b,
-                                            w,
-                                            Vec::new(),
-                                            rustc_hash::FxHashMap::default(),
-                                            tx_ids,
-                                        ));
-                                    }
-                                }
-                            });
+                            // Hand the block to a prefetch worker. The worker warm-loads input
+                            // UTXOs from disk in parallel with validation, then routes to the
+                            // feeder via OrderedReadyBridge (height order preserved). This is
+                            // what unblocks the validation workers from doing serial RocksDB
+                            // MultiGets on their own threads — the entire reason BPS plateaus
+                            // at 80–130 in the 340k+ range with workers stuck at ~11% CPU.
+                            dispatch_to_prefetch(item);
                         }
                         if reorder_buffer.len() >= dynamic_buffer_limit {
                             break;
@@ -1429,7 +1368,7 @@ impl ParallelIBD {
             }
         });
 
-        // Step 4: BLOCK FEEDER — drains ready_rx into shared buffer so validation can run while buffer fills.
+        // Block feeder: drains ready_rx into shared buffer so validation can run while buffer fills.
         // Feeder runs on std::thread (crossbeam recv is blocking). Buffer fills while validation works.
         // feeder_state was created earlier (before coordinator spawn) so the coordinator could reference it.
         let feeder_buffer_limit = mem_guard.buffer_limit(start_height);
@@ -1441,7 +1380,7 @@ impl ParallelIBD {
             feeder_buffer_bytes_limit,
         );
 
-        // Step 5: VALIDATION — runs on dedicated std::thread. Reads from shared buffer, waits on Condvar when empty.
+        // Validation worker thread: reads shared buffer, waits on Condvar when empty.
         let storage_clone = Arc::clone(storage);
         let utxo_mutex = Arc::new(std::sync::Mutex::new(std::mem::take(utxo_set)));
 
@@ -1470,6 +1409,7 @@ impl ParallelIBD {
             nominal_max_ahead: max_ahead_blocks,
             utxo_nominal_max_entries,
             utxo_prefetch_lookahead: utxo_pf,
+            stall_tx: stall_tx.clone(),
         };
         let validation_handle =
             std::thread::spawn(move || validation_loop::run_validation_loop(params));
@@ -1628,9 +1568,16 @@ impl ParallelIBD {
             }
         });
         let bip54_activation_override = {
-            let mut g = self.bip54_activation_from_version_bits.lock();
-            *g = blvm_protocol::version_bits::merge_bip54_activation_candidate(*g, candidate);
-            *g
+            use std::sync::atomic::Ordering;
+            // Lock-free monotonic merge: only update when we have a candidate, since merging with
+            // `None` is a no-op. `fetch_min` against `u64::MAX` (None sentinel) gives exact
+            // `min(prev, cand)` semantics matching `merge_bip54_activation_candidate`.
+            if let Some(c) = candidate {
+                self.bip54_activation_from_version_bits
+                    .fetch_min(c, Ordering::AcqRel);
+            }
+            let cur = self.bip54_activation_from_version_bits.load(Ordering::Acquire);
+            if cur == u64::MAX { None } else { Some(cur) }
         };
 
         let bip54_active = blvm_protocol::bip_validation::is_bip54_active_at(
@@ -2019,8 +1966,17 @@ impl ParallelIBD {
         let mut flush_order: Vec<usize> = (0..pending.len()).collect();
         flush_order.sort_by_key(|&i| pending[i].2);
 
+        // Returns true only if there is actual witness data (non-empty stack items).
+        // An all-empty Vec<Vec<Witness>> (pre-SegWit blocks) does NOT count as having witnesses
+        // and should not be stored, to avoid blocking re-download of SegWit blocks later.
+        let block_has_witness_data =
+            |w: &[Vec<Witness>]| w.iter().any(|tx_w| tx_w.iter().any(|stack| !stack.is_empty()));
+
         // Pre-serialize witness payloads once (shared by RocksDB unified flush and legacy per-CF batches).
-        let witness_blobs: Vec<Option<Vec<u8>>> = if pending.iter().any(|(_, w, _)| !w.is_empty()) {
+        let witness_blobs: Vec<Option<Vec<u8>>> = if pending
+            .iter()
+            .any(|(_, w, _)| block_has_witness_data(w))
+        {
             #[cfg(feature = "rayon")]
             {
                 use blvm_protocol::rayon::iter::IntoParallelRefIterator;
@@ -2029,7 +1985,7 @@ impl ParallelIBD {
                     .par_iter()
                     .enumerate()
                     .filter_map(|(i, (_, witnesses, _))| {
-                        if !witnesses.is_empty() {
+                        if block_has_witness_data(witnesses) {
                             match bincode::serialize(witnesses.as_ref()) {
                                 Ok(data) => Some((i, data)),
                                 Err(_) => None,
@@ -2052,7 +2008,7 @@ impl ParallelIBD {
                 let mut v = vec![None; pending.len()];
                 for i in 0..pending.len() {
                     let witnesses = &pending[i].1;
-                    if !witnesses.is_empty() {
+                    if block_has_witness_data(witnesses) {
                         v[i] = Some(bincode::serialize(witnesses.as_ref()).map_err(|e| {
                             anyhow::anyhow!("Failed to serialize witnesses: {}", e)
                         })?);
@@ -2166,9 +2122,9 @@ impl ParallelIBD {
                 batch.commit_no_wal()?;
             }
 
-            // Batch write witnesses (skip if all empty — common in early chain)
+            // Batch write witnesses (skip if no actual witness data — common in pre-SegWit chain)
             {
-                let has_witnesses = pending.iter().any(|(_, w, _)| !w.is_empty());
+                let has_witnesses = witness_blobs.iter().any(|b| b.is_some());
                 if has_witnesses {
                     let witnesses_tree = blockstore.witnesses_tree()?;
                     let mut batch = witnesses_tree.batch()?;
@@ -2347,28 +2303,12 @@ mod tests {
         );
     }
 
-    // ============================================================
-    // CRITICAL: Work Queue FIFO Order Tests
-    //
-    // This test prevents regression of the LIFO bug where chunks
-    // were downloaded in REVERSE order (highest heights first instead
-    // of lowest heights first). This caused IBD to fail because
-    // validation requires sequential processing from block 0.
-    // ============================================================
+    // Regression: chunk queue must drain in height order (FIFO). Vec::pop would yield highest
+    // heights first and break sequential validation.
 
     #[test]
     fn test_work_queue_fifo_order_not_lifo() {
-        // This test verifies the fix for the critical LIFO->FIFO bug
-        //
-        // BUG THAT WAS FIXED:
-        // - Used Vec::pop() which is LIFO (Last-In-First-Out)
-        // - This caused blocks to be downloaded starting at height 931,000
-        //   instead of height 0
-        // - Validation requires sequential processing from genesis
-        //
-        // FIX:
-        // - Changed to VecDeque::pop_front() which is FIFO (First-In-First-Out)
-        // - Now chunks are processed in the correct order (lowest heights first)
+        // Queue uses VecDeque::pop_front — lowest-height chunk leaves first.
 
         // Simulate the work queue as created in sync_parallel
         let chunks: Vec<(u64, u64, Option<String>)> = vec![
@@ -2400,38 +2340,29 @@ mod tests {
 
     #[test]
     fn test_vec_pop_is_lifo_bug() {
-        // Document the bug that was fixed: Vec::pop() is LIFO
-        // This test shows WHY the old code was wrong
+        // Vec::pop takes from the end — wrong order if used as a download work queue.
 
         let mut vec_queue: Vec<(u64, u64)> = vec![(0, 99), (100, 199), (200, 299)];
 
-        // Vec::pop() takes from the END (LIFO) - this was the BUG
         let popped = vec_queue.pop().unwrap();
         assert_eq!(
             popped,
             (200, 299),
             "Vec::pop() returns LAST element (LIFO behavior)"
         );
-
-        // This is why IBD was downloading height 931,000 first instead of height 0!
     }
 
     #[test]
     fn test_vecdeque_pop_front_is_fifo_correct() {
-        // Document the fix: VecDeque::pop_front() is FIFO
-
         let mut deque_queue: VecDeque<(u64, u64, Option<String>)> =
             VecDeque::from(vec![(0, 99, None), (100, 199, None), (200, 299, None)]);
 
-        // VecDeque::pop_front() takes from the FRONT (FIFO) - this is CORRECT
         let (s, e, _) = deque_queue.pop_front().unwrap();
         assert_eq!(
             (s, e),
             (0, 99),
             "VecDeque::pop_front() returns FIRST element (FIFO behavior)"
         );
-
-        // This ensures IBD downloads blocks starting from height 0
     }
 
     #[test]

@@ -610,8 +610,8 @@ impl BlockProvider for MockBlockProvider {
 ///   with `PeerInfo { address: addr.ip(), asn: None, country: None, implementation: None,
 ///   subnet: PeerInfo::extract_subnet(addr.ip()) }` and peer_id e.g. `format!("tcp:{}", addr)`
 ///
-/// **Entry point:** Not yet wired. Call from `node/mod.rs` after IBD or on startup.
-/// See `docs/UTXO_COMMITMENTS_IBD_INTEGRATION.md`.
+/// **Entry point:** No caller in this crate yet. Wire from node orchestration after IBD or on
+/// startup when the commitment store needs a network-fetched commitment (e.g. `node/mod.rs`).
 #[cfg(feature = "utxo-commitments")]
 pub async fn run_utxo_commitments_initial_sync(
     network_manager: std::sync::Arc<tokio::sync::RwLock<crate::network::NetworkManager>>,
