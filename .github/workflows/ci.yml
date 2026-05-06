@@ -45,6 +45,33 @@ jobs:
       consensus-cache-key: ${{ steps.setup-cache.outputs.consensus-cache-key }}
       protocol-cache-key: ${{ steps.setup-cache.outputs.protocol-cache-key }}
     steps:
+      - name: Emergency pre-flight disk cleanup
+        run: |
+          echo "=== disk BEFORE cleanup ==="
+          df -h /
+          # Nuke ALL stale run dirs (every dir except a currently-active run on THIS runner).
+          # We can't know other runners' run_ids, so we delete everything older than 1 hour.
+          # The teardown job deletes the current run dir at the end, so at steady-state
+          # nothing should survive here — but we clean defensively on every setup.
+          if [ -d /tmp/gh-blvm-node-build ]; then
+            find /tmp/gh-blvm-node-build -mindepth 1 -maxdepth 1 -type d \
+              -not -name "${{ github.run_id }}" \
+              -mmin +60 \
+              -exec rm -rf {} + 2>/dev/null || true
+            # If still >50 GB used by gh-blvm-node-build, evict everything except current run.
+            USED=$(du -sb /tmp/gh-blvm-node-build 2>/dev/null | cut -f1 || echo 0)
+            if [ "$USED" -gt 53687091200 ]; then
+              echo "⚠️  gh-blvm-node-build still >50 GB after 1h prune — force-evicting all stale dirs"
+              find /tmp/gh-blvm-node-build -mindepth 1 -maxdepth 1 -type d \
+                -not -name "${{ github.run_id }}" \
+                -exec rm -rf {} + 2>/dev/null || true
+            fi
+          fi
+          # Fuzz artifacts from previous runs
+          rm -rf /tmp/gh-fuzz-blvm-node 2>/dev/null || true
+          echo "=== disk AFTER cleanup ==="
+          df -h /
+
       - name: Disk check
         uses: BTCDecoded/rust-ci/runner-disk-guard@main
         with:

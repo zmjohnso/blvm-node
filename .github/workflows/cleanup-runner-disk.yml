@@ -31,14 +31,23 @@ jobs:
             echo "No stale build dirs found at $BASE"
             exit 0
           fi
-          echo "=== Stale run dirs under $BASE ==="
-          find "$BASE" -mindepth 1 -maxdepth 1 -type d -mtime +7 | while read -r dir; do
+          echo "=== ALL run dirs under $BASE ==="
+          find "$BASE" -mindepth 1 -maxdepth 1 -type d | while read -r dir; do
             SIZE=$(du -sh "$dir" 2>/dev/null | cut -f1)
-            echo "  $dir ($SIZE)"
+            AGE=$(find "$dir" -maxdepth 0 -printf '%Td days %TH:%TM\n' 2>/dev/null || echo "?")
+            echo "  $dir ($SIZE, modified $AGE ago)"
             if [ "$DRY" != "true" ]; then
               rm -rf "$dir"
             fi
           done
+          # Also clean fuzz dir
+          if [ -d /tmp/gh-fuzz-blvm-node ]; then
+            SIZE=$(du -sh /tmp/gh-fuzz-blvm-node 2>/dev/null | cut -f1)
+            echo "  /tmp/gh-fuzz-blvm-node ($SIZE)"
+            if [ "$DRY" != "true" ]; then
+              rm -rf /tmp/gh-fuzz-blvm-node
+            fi
+          fi
 
       - name: Remove stale test binaries from workspace target (older than 7 days)
         run: |
