@@ -25,8 +25,23 @@ use rustc_hash::{FxHashMap, FxHashSet};
 #[cfg(feature = "production")]
 use std::str::FromStr;
 use std::sync::atomic::{AtomicIsize, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use tracing::debug;
+
+/// Per-op MuHash maintenance during IBD retire is **off by default** because each delete
+/// requires a synchronous `disk.get(key)` lookup plus a 3072-bit modular multiplication —
+/// at ~700 ops/block on the retire critical path this caps drain throughput in the low
+/// thousands of ops/sec and starves validation. Set `BLVM_IBD_ENABLE_MUHASH=1` to opt back
+/// in (e.g. when correctness of the persisted UTXO commitment matters more than IBD speed).
+fn ibd_per_op_muhash_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("BLVM_IBD_ENABLE_MUHASH")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
 
 type OutPointKey = [u8; 40];
 
@@ -1265,22 +1280,31 @@ impl IbdUtxoStore {
         let approx = self.pending_log_size.load(Ordering::Relaxed);
         let mut all = Vec::with_capacity(approx.min(65536));
         let mut drained = 0usize;
+        // Fast path when validation is far ahead of retire (workers fill shards with
+        // entries for heights far above `max_block_height_inclusive`). The previous
+        // implementation called `s.drain(..)` to empty the shard and then rebuilt the
+        // shard from a fresh `keep: Vec`, which allocated `O(retained × 80 B)` bytes per
+        // call. With 8 M pending entries and 99 % retained per drain (because `next_height`
+        // ≪ `worker_height`), this reallocated ~700 MB per drain — pinning the retire thread
+        // at ~85 % CPU on alloc/copy and starving the actual flush work.
+        //
+        // `swap_remove` is O(1) per drained entry; iteration is O(shard_len) which is
+        // unavoidable (we must inspect every entry's height). No realloc, no second `Vec`.
+        // Eviction order is disrupted but `pack_flush_package` re-sorts by key + height
+        // anyway, so order doesn't matter to correctness.
         for shard in self.pending_shards.iter() {
             let mut s = shard.lock().expect("pending shard lock");
             if s.is_empty() {
                 continue;
             }
-            let mut keep: Vec<PendingLogEntry> = Vec::new();
-            for entry in s.drain(..) {
-                if entry.2 <= max_block_height_inclusive {
-                    all.push(entry);
+            let mut i = 0;
+            while i < s.len() {
+                if s[i].2 <= max_block_height_inclusive {
+                    all.push(s.swap_remove(i));
                     drained += 1;
                 } else {
-                    keep.push(entry);
+                    i += 1;
                 }
-            }
-            if !keep.is_empty() {
-                *s = keep;
             }
         }
         let prev = self.pending_log_size.load(Ordering::Relaxed);
@@ -1443,8 +1467,16 @@ impl IbdUtxoStore {
             if chunk.is_empty() {
                 continue;
             }
-            if let Some(mhref) = muhash.as_mut() {
+            // Per-op MuHash is the dominant retire-thread cost (each delete is a disk read
+            // + 3072-bit modular multiplication). Skip entirely unless explicitly enabled.
+            if ibd_per_op_muhash_enabled() {
+                if let Some(mhref) = muhash.as_mut() {
                 let mh: &mut MuHash3072 = *mhref;
+                // Hot path: ~200 k rows per flush. The previous `*mh = mh.clone().insert(&pre)`
+                // form cloned the running MuHash (768 B = two `Num3072`) per row → ~150 MB of
+                // ephemeral allocations per flush, all under the muhash mutex that other flush
+                // threads are blocked on. `insert_mut` / `remove_mut` (blvm-muhash 0.1.7+) keep
+                // the same arithmetic but mutate in place — same hash, no clone, less mutex hold.
                 for (key, value_opt) in chunk {
                     match value_opt {
                         Some((start, len)) => {
@@ -1455,7 +1487,7 @@ impl IbdUtxoStore {
                                     })?;
                             let op = key_to_outpoint(key);
                             let pre = utxo_muhash_preimage_ibd(&op, &utxo);
-                            *mh = mh.clone().insert(&pre);
+                            mh.insert_mut(&pre);
                         }
                         None => {
                             // Persisted `ibd_utxos` has no row: the outpoint never made it to disk as an
@@ -1474,9 +1506,10 @@ impl IbdUtxoStore {
                             })?;
                             let op = key_to_outpoint(key);
                             let pre = utxo_muhash_preimage_ibd(&op, &utxo);
-                            *mh = mh.clone().remove(&pre);
+                            mh.remove_mut(&pre);
                         }
                     }
+                }
                 }
             }
             let mut b = self.disk.batch()?;

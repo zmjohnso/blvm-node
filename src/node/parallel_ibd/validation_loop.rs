@@ -231,10 +231,19 @@ pub(crate) fn ibd_v2_retire_apply_utxo_delta(
         const CRITICAL_MIN_FLUSH_OPS: usize = 1_000;
         let should_force =
             pressure_level == PressureLevel::Emergency || pending_now >= CRITICAL_MIN_FLUSH_OPS;
+        // `u64::MAX`: workers strictly push pending **before** dispatching retire work
+        // (`retire_dispatcher.rs` invariant 1), so any entry currently in pending is for a
+        // block that has already finished validation. Draining everything (no height filter)
+        // lets the retire thread skip the O(n) `drain_pending_through_height` scan that
+        // dominated retire CPU once workers ran ahead — at h=180 k pending reached 8.6 M and
+        // retire spent 85 % of its time iterating ~7.9 M not-yet-eligible entries per call.
+        // The flush package's `max_block_height` may exceed `local_last_retired` but the
+        // chain watermark is allowed to advance past `global_last_retired` (`retire_dispatcher.rs`
+        // invariant 2: watermark tracks worker production, not the contiguous retire floor).
         let batch = if should_force {
-            store.take_flush_batch_force_through(next_height)
+            store.take_flush_batch_force()
         } else {
-            store.maybe_take_flush_batch_through(next_height)
+            store.maybe_take_flush_batch()
         };
         ibd_maybe_heap_trim();
         (0u64, protect_evict_ms, batch, true)
@@ -242,18 +251,18 @@ pub(crate) fn ibd_v2_retire_apply_utxo_delta(
         // Elevated: don't disturb the pipeline. Take a normal-threshold flush if it's already due,
         // skip heap_trim. The download-ahead reduction (already applied by adjust_max_ahead_live)
         // is enough to ease the pressure.
-        let batch = store.maybe_take_flush_batch_through(next_height);
+        let batch = store.maybe_take_flush_batch();
         (0u64, protect_evict_ms, batch, false)
     } else if ibd_defer_flush {
         let at_checkpoint = next_height > 0 && next_height % ibd_defer_checkpoint == 0;
         let batch = if at_checkpoint {
-            store.take_flush_batch_force_through(next_height)
+            store.take_flush_batch_force()
         } else {
             None
         };
         (0u64, protect_evict_ms, batch, false)
     } else {
-        let batch = store.maybe_take_flush_batch_through(next_height);
+        let batch = store.maybe_take_flush_batch();
         (0u64, protect_evict_ms, batch, false)
     }
 }
@@ -292,26 +301,71 @@ fn dynamic_prefetch_lookahead(level: PressureLevel, nominal: usize) -> usize {
 }
 
 /// One block handed to the background retire thread (after validation enqueues the delta in `staged`).
-struct IbdRetireWork {
-    height: u64,
-    blocks_buf: Vec<Arc<Block>>,
-    block: Arc<Block>,
+///
+/// Fields are `pub(crate)` so the sibling `retire_dispatcher` module can route on `height`
+/// without importing the (mostly internal) validation pipeline. Construction stays
+/// inside `validation_loop` (the only producer).
+pub(crate) struct IbdRetireWork {
+    pub(crate) height: u64,
+    pub(crate) blocks_buf: Vec<Arc<Block>>,
+    pub(crate) block: Arc<Block>,
+}
+
+/// How many retire packages to commit to the memtable before issuing a synchronous
+/// `flush_disk()` + `persist_ibd_utxo_flush_checkpoint`. Larger batches → fewer L0 SSTs
+/// → much less compaction churn at h≥180 k where retire produces ~10 packages/second.
+///
+/// Default (`8`) was chosen so each durability boundary writes ≥1× write_buffer_size
+/// (192 MB on 16 GiB hosts) of data, producing one large SST instead of 8 micro-SSTs.
+/// At `1` (legacy behaviour) the per-package `flush_cf` cycle wedges retire at h~190 k
+/// because compaction can't drain L0 fast enough.
+///
+/// Override via `BLVM_IBD_RETIRE_FLUSH_BATCH=N`. `N=1` restores per-package durability
+/// (useful for stress testing crash-recovery; soft autorepair still handles a watermark
+/// gap after a partial-batch crash, but each partial batch loses up to `N-1` packages
+/// of progress on restart).
+fn retire_flush_batch_size() -> usize {
+    std::env::var("BLVM_IBD_RETIRE_FLUSH_BATCH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n: &usize| *n >= 1)
+        .unwrap_or(8)
 }
 
 /// Push a UTXO disk flush from the retire thread; joins older flushes when the in-flight cap is hit.
 ///
 /// Concurrency uses [`memory::utxo_flush_concurrency_cap`]: bounded burst under healthy pressure,
 /// strict tier cap under Critical+. Never uses an unbounded ceiling (historically 1024 → OOM).
+///
+/// **Batched durability.** Most calls only run `flush_prepared_package` (writes rows to the
+/// `ibd_utxos` memtable via `commit_no_wal`) on a spawned thread; they skip `flush_disk` and
+/// `persist_ibd_utxo_flush_checkpoint`. Every `retire_flush_batch_size()`-th call (and shutdown
+/// drains; see `take_remaining_flush_package`) runs the durability path *synchronously*: it
+/// drains all in-flight commits, then `flush_disk` (forces memtable → SST) and
+/// `persist_ibd_utxo_flush_checkpoint` (atomic watermark+running-MuHash bump). This collapses
+/// `BATCH` micro-SSTs into one large SST, reducing L0 churn ~`BATCH`× and eliminating the
+/// h~190 k retire wedge where RocksDB's compaction couldn't drain L0 fast enough.
+///
+/// Crash safety: between durability boundaries the watermark stays at the last persisted
+/// height; on restart the soft autorepair pass detects `chain_tip > watermark` and replays
+/// the gap. The strict `flush_disk` → `persist_checkpoint` ordering inside the durability
+/// path preserves the invariant that watermark never advances past durable ibd_utxos rows.
 fn push_utxo_flush_from_retire(
     store: &Arc<IbdUtxoStore>,
     storage_wm: &Arc<Storage>,
     utxo_flush_handles: &Arc<Mutex<VecDeque<JoinHandle<Result<()>>>>>,
+    retire_flush_counter: &Arc<AtomicUsize>,
     next_height: u64,
     max_utxo_flushes_in_flight: usize,
     pkg: PendingFlushPackage,
     ibd_muhash: &Arc<Mutex<blvm_muhash::MuHash3072>>,
 ) -> Result<()> {
     let flush_limit = memory::utxo_flush_concurrency_cap(max_utxo_flushes_in_flight).max(1);
+    let batch_count = retire_flush_batch_size();
+    let n = retire_flush_counter.fetch_add(1, Ordering::Relaxed);
+    // Do durability on the first call (cold-start: nothing in memtable yet, but we
+    // want a clean checkpoint before workload heats up) and every Nth thereafter.
+    let do_durability = batch_count <= 1 || n % batch_count == 0;
     let mut q = utxo_flush_handles.lock();
     while q.len() >= flush_limit {
         let Some(handle) = q.pop_front() else {
@@ -327,50 +381,85 @@ fn push_utxo_flush_from_retire(
             }
         }
     }
-    let store_clone = Arc::clone(store);
-    let storage_clone = Arc::clone(storage_wm);
-    let mh_acc = Arc::clone(ibd_muhash);
     let batch_size = pkg.ops.len();
     let heights = Arc::clone(&pkg.heights);
-    q.push_back(std::thread::spawn(move || {
+    if do_durability {
+        // Synchronous durability path. Drain ALL in-flight async commits first so the
+        // memtable contains every prior package's rows before we flush_cf. Without this,
+        // the watermark could advance past not-yet-committed data on a slow-async/fast-sync
+        // race. After the drain, we run this package's commit, then flush_disk, then
+        // persist_ibd_utxo_flush_checkpoint atomically as the durability boundary.
+        while let Some(handle) = q.pop_front() {
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return Err(e),
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "UTXO flush panicked while draining for durability: {:?}",
+                        e
+                    ));
+                }
+            }
+        }
+        drop(q);
         let prepared = pkg.prepare_for_disk()?;
         let muhash_running = {
-            let mut mh_guard = mh_acc.lock();
-            store_clone.flush_prepared_package(&prepared, Some(&mut *mh_guard))?;
+            let mut mh_guard = ibd_muhash.lock();
+            store.flush_prepared_package(&prepared, Some(&mut *mh_guard))?;
             mh_guard.serialize_running_state()
         };
         // `commit_no_wal` leaves rows in the memtable until flush_cf — persist SST first so a
-        // crash cannot advance `ibd_utxo_watermark` past durable ibd_utxos rows (see IbdUtxoStore::flush_disk).
-        store_clone.flush_disk()?;
-        storage_clone
+        // crash cannot advance `ibd_utxo_watermark` past durable ibd_utxos rows.
+        store.flush_disk()?;
+        storage_wm
             .chain()
             .persist_ibd_utxo_flush_checkpoint(prepared.max_block_height, &muhash_running)?;
-        // Release height-based eviction protection now that all ops for these heights are
-        // on disk. This makes cache entries at those heights eligible for eviction, which
-        // reduces protected_len from O(pipeline_depth) back toward zero after each flush.
-        store_clone.release_protected_heights(&heights);
-        store_clone.note_utxo_flush_completed(prepared.max_block_height);
-        Ok(())
-    }));
-    debug!(
-        "[IBD_DEBUG] Block {}: spawned UTXO flush (retire thread, batch_size={}, in_flight={})",
-        next_height,
-        batch_size,
-        q.len()
-    );
+        store.release_protected_heights(&heights);
+        store.note_utxo_flush_completed(prepared.max_block_height);
+        debug!(
+            "[IBD_DEBUG] Block {}: durability flush boundary (batch_size={}, n={})",
+            next_height, batch_size, n,
+        );
+    } else {
+        // Async commit path: rows go to memtable via commit_no_wal. No flush_disk, no
+        // watermark bump — those happen at the next durability boundary. release_protected
+        // and note_utxo_flush_completed CAN safely run pre-durability: they only affect
+        // in-memory eviction policy, not on-disk state. If we crash before the next
+        // durability boundary, soft autorepair detects the watermark gap and replays.
+        let store_clone = Arc::clone(store);
+        let mh_acc = Arc::clone(ibd_muhash);
+        q.push_back(std::thread::spawn(move || {
+            let prepared = pkg.prepare_for_disk()?;
+            {
+                let mut mh_guard = mh_acc.lock();
+                store_clone.flush_prepared_package(&prepared, Some(&mut *mh_guard))?;
+            }
+            store_clone.release_protected_heights(&heights);
+            store_clone.note_utxo_flush_completed(prepared.max_block_height);
+            Ok(())
+        }));
+        debug!(
+            "[IBD_DEBUG] Block {}: async commit (batch_size={}, in_flight={}, n={})",
+            next_height,
+            batch_size,
+            q.len(),
+            n,
+        );
+    }
     Ok(())
 }
 
-/// Drop the work channel (so the retire thread exits `recv`), join it, propagate `retire_err`.
+/// Drop all work channels (so each retire shard exits `recv`), join every shard, then
+/// propagate the first stored error (if any). Equivalent to the pre-sharding behavior
+/// for `BLVM_IBD_RETIRE_SHARDS=1`; for `>=2` it serially shuts down each shard. Errors
+/// from `JoinHandle::join()` (panic in a retire thread) take precedence over `retire_err`,
+/// because a panic indicates a programming bug we want to surface, while `retire_err`
+/// is the path errors take when retire returned cleanly with a stored error.
 fn retire_thread_shutdown(
-    work_tx: mpsc::Sender<IbdRetireWork>,
-    retire_thread: JoinHandle<()>,
+    retire_dispatcher: &mut super::retire_dispatcher::RetireDispatcher,
     retire_err: &Arc<Mutex<Option<anyhow::Error>>>,
 ) -> Result<()> {
-    std::mem::drop(work_tx);
-    if let Err(e) = retire_thread.join() {
-        return Err(anyhow::anyhow!("IBD retire thread join failed: {:?}", e));
-    }
+    retire_dispatcher.shutdown_and_join()?;
     if let Some(e) = retire_err.lock().take() {
         return Err(e);
     }
@@ -484,7 +573,14 @@ struct InFlightEntry {
 /// `max_pending_ops` bounds `pending_shards` (UTXO ops awaiting disk flush). When the pending
 /// log exceeds this, the worker yields/sleeps so the retire thread can drain. Without this,
 /// validation can race tens of thousands of blocks ahead of retire, accumulating millions of
-/// pending ops in RAM (→ OOM on 16 GiB hosts). 0 disables the limit.
+/// pending ops in RAM (→ OOM on 16 GiB hosts).
+///
+/// The cap is an `Arc<AtomicUsize>` so the retire-loop controller (Tier 3) can **adapt**
+/// it online based on observed RSS pressure and drain throughput — see
+/// [`adapt_max_pending_ops_tick`] for the policy. Workers reload the cap on every
+/// backpressure check, so adaptive shrink/grow takes effect within one block. A loaded
+/// value of `0` disables the limit entirely (high-RAM hosts where the full pipeline
+/// trivially fits in RAM).
 #[allow(clippy::too_many_arguments)]
 fn run_validation_worker_shared(
     rx: crossbeam_channel::Receiver<ValidateJob>,
@@ -494,7 +590,7 @@ fn run_validation_worker_shared(
     protocol: Arc<blvm_protocol::BitcoinProtocolEngine>,
     store: Arc<IbdUtxoStore>,
     last_retired: Arc<AtomicU64>,
-    max_pending_ops: usize,
+    max_pending_ops: Arc<AtomicUsize>,
 ) {
     // Per-worker scratch buffers. UtxoSet capacity carries over (~peak inputs of recent block).
     let mut utxo_base: UtxoSet = UtxoSet::default();
@@ -630,9 +726,16 @@ fn run_validation_worker_shared(
             // pending ops (~4.6 GB) causing OOM. We yield first (cheap, 0–10 µs) and only
             // sleep on extended overrun, so retire never starves and early-chain BPS is
             // unaffected.
-            if max_pending_ops > 0 {
+            // Reload the cap on each backpressure check — the adaptive controller may
+            // have shrunk it (RSS pressure rising) or grown it (drain keeping up). Cap=0
+            // disables backpressure outright (only on hosts the controller has decided
+            // can absorb the full pipeline).
+            let cap = max_pending_ops.load(Ordering::Relaxed);
+            if cap > 0 {
                 let mut spins = 0u32;
-                while store.pending_len() > max_pending_ops {
+                // Re-load the cap inside the spin loop too, so a controller-driven grow
+                // can release the worker before it sleeps long.
+                while store.pending_len() > max_pending_ops.load(Ordering::Relaxed) {
                     if spins < 8 {
                         std::thread::yield_now();
                     } else {
@@ -650,6 +753,111 @@ fn run_validation_worker_shared(
             elapsed,
             view_build_ms,
         });
+    }
+}
+
+/// Adapt `max_pending_ops` online based on RSS pressure and pending-log fill ratio.
+///
+/// The static tier table (4M / 8M / 16M / 0) was a one-shot decision at IBD start; on
+/// real workloads the right cap depends on (a) what RSS the host is actually using right
+/// now (pressure climbs as the UTXO cache grows past h=200 k) and (b) whether retire is
+/// keeping up with validation (drain throughput is what backpressure exists to bound).
+/// Holding the static cap means: under pressure we OOM (cap too high), and under calm
+/// we throttle validation when retire could absorb more (cap too low).
+///
+/// **Policy.**
+/// - `Emergency` → halve the cap (floor `nominal/16`, hard floor `100 k`). RSS is
+///   seconds from OOM, so the **only** safe action is shrinking the headroom validators
+///   are allowed to occupy.
+/// - `Critical` → multiply by 0.75 (floor `nominal/8`, hard floor `500 k`). Memory
+///   guard is recommending eviction + flush; lowering the cap helps both happen sooner.
+/// - `Elevated` → hold. The pressure response (lower `max_ahead_live`, more frequent
+///   flushes) is enough; further cap-shrink would just stall workers without helping RSS.
+/// - `None` → if `pending_len < cap/4` retire is keeping up trivially, grow the cap by
+///   10% (capped at `1.1 × nominal`). Otherwise hold.
+///
+/// **Throttle.** Adaptation runs at most once per ~500 ms (controlled by
+/// `last_adapt_ms`). Adjusting more often produces oscillation when pressure flicks
+/// between bands every few blocks.
+///
+/// **Disabled when `nominal == 0`.** That's the ≥32 GiB tier where backpressure is off
+/// outright; never re-engage it adaptively, because the host class is sized to absorb
+/// the full pipeline by configuration.
+fn adapt_max_pending_ops_tick(
+    cap: &AtomicUsize,
+    nominal: usize,
+    pressure: PressureLevel,
+    pending_len: usize,
+    last_adapt_ms: &AtomicU64,
+) {
+    if nominal == 0 {
+        return;
+    }
+    const TICK_INTERVAL_MS: u64 = 500;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let last = last_adapt_ms.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(last) < TICK_INTERVAL_MS {
+        return;
+    }
+    // CAS so two retire shards racing this don't both adapt in the same window.
+    if last_adapt_ms
+        .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+
+    let current = cap.load(Ordering::Relaxed);
+    let new = match pressure {
+        PressureLevel::Emergency => {
+            // Aggressive shrink. Floor protects against runaway-tiny caps that would
+            // stall validation entirely (pending_len would never drop fast enough to
+            // unblock a worker if the cap dropped below the in-flight-block working set).
+            (current / 2).max(nominal / 16).max(100_000)
+        }
+        PressureLevel::Critical => {
+            (current * 3 / 4).max(nominal / 8).max(500_000)
+        }
+        PressureLevel::Elevated => current,
+        PressureLevel::None => {
+            // Grow only when retire is *clearly* ahead — pending_len well below current.
+            // Ceiling is 1.1× nominal (not 2×) to prevent a fast-drain burst from
+            // granting workers a massive head-start that fills RAM once blocks get heavier
+            // (the regression seen at h≈130k where 16M ops accumulated and retire crawled
+            // at 6 BPS for hours). A 10% buffer above the budgeted nominal is enough to
+            // absorb transient bursts without blowing the memory budget.
+            if pending_len < current / 4 {
+                let grown = (current as u128).saturating_mul(11) / 10;
+                let max = (nominal as u128).saturating_mul(11) / 10;
+                grown.min(max).max(nominal as u128 / 4) as usize
+            } else {
+                current
+            }
+        }
+    };
+
+    if new != current {
+        cap.store(new, Ordering::Relaxed);
+        if matches!(
+            pressure,
+            PressureLevel::Critical | PressureLevel::Emergency
+        ) || (pressure == PressureLevel::None && new > current)
+        {
+            // Log meaningful transitions only — Elevated holds wouldn't appear here, and
+            // None-with-no-change returns early. Helps correlate observed BPS dips with
+            // cap shrinks during post-mortems.
+            tracing::debug!(
+                "[IBD_ADAPT] max_pending_ops {} → {} (pressure={:?}, pending={}, nominal={})",
+                current,
+                new,
+                pressure,
+                pending_len,
+                nominal
+            );
+        }
     }
 }
 
@@ -821,6 +1029,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     let utxo_flush_handles = Arc::new(Mutex::new(
         VecDeque::<std::thread::JoinHandle<Result<()>>>::new(),
     ));
+    // Per-IBD-run counter shared across retire shards (kept at 1 by default; increments only
+    // on each `push_utxo_flush_from_retire` call). Drives the durability batching schedule
+    // documented on `push_utxo_flush_from_retire`.
+    let retire_flush_counter: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let (max_block_flushes_in_flight, max_utxo_flushes_under_pressure) = {
         let g = mem_mtx.lock();
         (g.max_block_flushes, g.max_utxo_flushes)
@@ -872,9 +1084,18 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // not deep clones of the delta vectors. Retire takes the Arc out (refcount drops to 1 after
     // the dispatcher's transient fold clones go out of scope) and operates on the inner value.
     let staged: Arc<Mutex<BTreeMap<u64, Arc<UtxoDelta>>>> = Arc::new(Mutex::new(BTreeMap::new()));
-    let last_retired: Arc<AtomicU64> = Arc::new(AtomicU64::new(start_height.saturating_sub(1)));
     let retire_err: Arc<Mutex<Option<anyhow::Error>>> = Arc::new(Mutex::new(None));
-    let (work_tx, work_rx) = mpsc::channel::<IbdRetireWork>();
+    // Sharded retire (default `BLVM_IBD_RETIRE_SHARDS=1` → original single-threaded behavior).
+    // N=1 path is bit-identical: the dispatcher just wraps a single mpsc channel and a single
+    // retire thread, and `publisher.publish` is a no-op fold over a one-element list.
+    let num_retire_shards = super::retire_dispatcher::configured_retire_shards();
+    if num_retire_shards > 1 {
+        info!(
+            "[IBD_RETIRE] sharded retire enabled: BLVM_IBD_RETIRE_SHARDS={} (workers contend on \
+             mem_mtx/mh_acc; sweet spot is 2..=4)",
+            num_retire_shards
+        );
+    }
     // Recent rate: blocks since last status / elapsed since last status. Shows burst vs wait (avg can overstate when mostly waiting).
     let mut last_log_blocks: u64 = 0;
     let mut last_log_instant = std::time::Instant::now();
@@ -914,78 +1135,197 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         crate::storage::ibd_utxo_muhash::load_ibd_muhash_from_chain(storage_clone.chain())?,
     ));
 
-    // Background retire: applies staged deltas, UTXO store update, UTXO flush spawns, commitment.
-    let retire_err_join = retire_err.clone();
+    // Pending-ops backpressure: cap entries in `pending_shards` at a RAM-tier-derived limit.
+    // The retire thread drains pending one height at a time; without a cap, validation races
+    // ahead and accumulates millions of pending UTXO ops in RAM (~200 B/entry). At h=200 k on
+    // a 16 GiB host we observed 22.5 M ops (~4.6 GB) → OOM.
+    //
+    // Why entries instead of block-lag: ops/block varies wildly by chain era (150/block early,
+    // 8 000/block late), so a fixed block-lag cap is either useless or devastating depending on
+    // height. Entries map directly to memory.
+    //
+    // Defaults (override via BLVM_IBD_MAX_PENDING_OPS):
+    //   ≤16 GiB: 4 M  (~800 MB pending,  ~5% of RAM)
+    //   16–24 GiB: 8 M (~1.6 GB)
+    //   24–32 GiB: 16 M (~3.2 GB)
+    //   ≥32 GiB: unlimited (high-RAM hosts can absorb the full pipeline)
+    // Nominal cap = the historical static tier value. The adaptive controller treats
+    // this as the **anchor**: pressure pushes the live cap below nominal, calm pushes it
+    // back up, never higher than `1.1 × nominal` (a 10% buffer above the budgeted RAM
+    // class to absorb transient bursts without letting workers run arbitrarily far ahead).
+    let max_pending_ops_nominal: usize = std::env::var("BLVM_IBD_MAX_PENDING_OPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| {
+            let total_gb = (system_total_ram_mb + 512) / 1024;
+            if total_gb >= 32 {
+                0
+            } else if total_gb >= 24 {
+                16_000_000
+            } else if total_gb >= 16 {
+                // 8 M ≈ 1.2 GB pending memory. Bumping to 12 M on 16 GiB hosts pushed
+                // resident set into swap (12 GB used + 2.5 GB swapped → page faults
+                // stalled the workers). Stay at 8 M; let the retire-side flush batching
+                // (see `retire_flush_batch_size`) absorb the SST-churn problem.
+                8_000_000
+            } else if total_gb >= 12 {
+                6_000_000
+            } else {
+                4_000_000
+            }
+        });
+    // Live cap that the validation workers read on every backpressure check. The retire
+    // loop's `adapt_max_pending_ops_tick` mutates this atomic at most every ~500 ms based
+    // on observed RSS pressure (`memory::ibd_pressure_*`) and drain headroom
+    // (`pending_len` vs cap).  When `nominal == 0` (≥32 GiB hosts), backpressure is off
+    // and adaptation is a no-op.
+    let max_pending_ops: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(max_pending_ops_nominal));
+    let max_pending_ops_last_adapt_ms: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    if max_pending_ops_nominal > 0 {
+        info!(
+            "IBD: pending-ops backpressure active (max_pending_ops={}, adaptive: shrinks under \
+             RSS pressure, grows when drain keeps up; bounds [nominal/16, 2*nominal])",
+            max_pending_ops_nominal
+        );
+    } else {
+        info!(
+            "IBD: pending-ops backpressure disabled (32 GiB+ tier — full pipeline fits in RAM)"
+        );
+    }
+
+    // Background retire dispatcher: 1..N retire threads, sharded by `height % N`.
+    // Each shard runs the same retire loop body as before; only the cursor wiring
+    // differs (`local_last_retired` per shard, `publisher` recomputes the global min).
+    // `_retire_dispatcher` is held by the outer scope until shutdown — dropping it
+    // closes all senders and joins all retire threads.
     #[cfg(all(feature = "utxo-commitments", feature = "production"))]
-    let _retire_thread: JoinHandle<()> = {
-        let staged = Arc::clone(&staged);
-        let last_retired = Arc::clone(&last_retired);
-        let store = Arc::clone(&ibd_store_v2_for_validation);
-        let mem_mtx = Arc::clone(&mem_mtx);
-        let utxo_flush_handles = Arc::clone(&utxo_flush_handles);
-        let max_ahead_live = Arc::clone(&max_ahead_live);
-        let blockstore = Arc::clone(&blockstore);
-        let ctree = commitment_tree_shared.clone();
-        let cst = commitment_store_opt.clone();
-        let storage_wm = Arc::clone(&storage_for_retire);
-        let ibd_mh = Arc::clone(&ibd_muhash_accumulator);
-        std::thread::Builder::new()
-            .name("ibd-retire".to_string())
-            .spawn(move || {
-                run_ibd_retire_loop_with_commitment(
-                    work_rx,
-                    staged,
-                    last_retired,
-                    store,
-                    storage_wm,
-                    mem_mtx,
-                    max_ahead_live,
-                    nominal_max_ahead,
-                    ibd_defer_flush,
-                    ibd_defer_checkpoint,
-                    max_utxo_flushes_under_pressure,
-                    utxo_flush_handles,
-                    retire_err_join,
-                    blockstore,
-                    ctree,
-                    cst,
-                    ibd_mh,
-                );
-            })
-            .expect("spawn IBD retire thread")
+    let mut _retire_dispatcher = {
+        let staged_outer = Arc::clone(&staged);
+        let store_outer = Arc::clone(&ibd_store_v2_for_validation);
+        let mem_mtx_outer = Arc::clone(&mem_mtx);
+        let utxo_flush_handles_outer = Arc::clone(&utxo_flush_handles);
+        let retire_flush_counter_outer = Arc::clone(&retire_flush_counter);
+        let max_ahead_live_outer = Arc::clone(&max_ahead_live);
+        let blockstore_outer = Arc::clone(&blockstore);
+        let ctree_outer = commitment_tree_shared.clone();
+        let cst_outer = commitment_store_opt.clone();
+        let storage_wm_outer = Arc::clone(&storage_for_retire);
+        let ibd_mh_outer = Arc::clone(&ibd_muhash_accumulator);
+        let retire_err_outer = Arc::clone(&retire_err);
+        let mpo_outer = Arc::clone(&max_pending_ops);
+        let mpo_last_outer = Arc::clone(&max_pending_ops_last_adapt_ms);
+        super::retire_dispatcher::RetireDispatcher::spawn(
+            num_retire_shards,
+            start_height.saturating_sub(1),
+            |i, work_rx, local_last_retired, publisher| {
+                let staged = Arc::clone(&staged_outer);
+                let store = Arc::clone(&store_outer);
+                let mem_mtx = Arc::clone(&mem_mtx_outer);
+                let utxo_flush_handles = Arc::clone(&utxo_flush_handles_outer);
+                let retire_flush_counter = Arc::clone(&retire_flush_counter_outer);
+                let max_ahead_live = Arc::clone(&max_ahead_live_outer);
+                let blockstore = Arc::clone(&blockstore_outer);
+                let ctree = ctree_outer.clone();
+                let cst = cst_outer.clone();
+                let storage_wm = Arc::clone(&storage_wm_outer);
+                let ibd_mh = Arc::clone(&ibd_mh_outer);
+                let retire_err = Arc::clone(&retire_err_outer);
+                let mpo = Arc::clone(&mpo_outer);
+                let mpo_last = Arc::clone(&mpo_last_outer);
+                std::thread::Builder::new()
+                    .name(format!("ibd-retire-{}", i))
+                    .spawn(move || {
+                        run_ibd_retire_loop_with_commitment(
+                            work_rx,
+                            staged,
+                            local_last_retired,
+                            publisher,
+                            store,
+                            storage_wm,
+                            mem_mtx,
+                            max_ahead_live,
+                            nominal_max_ahead,
+                            ibd_defer_flush,
+                            ibd_defer_checkpoint,
+                            max_utxo_flushes_under_pressure,
+                            utxo_flush_handles,
+                            retire_flush_counter,
+                            retire_err,
+                            blockstore,
+                            ctree,
+                            cst,
+                            ibd_mh,
+                            mpo,
+                            max_pending_ops_nominal,
+                            mpo_last,
+                        );
+                    })
+                    .expect("spawn IBD retire shard")
+            },
+        )
     };
     #[cfg(not(all(feature = "utxo-commitments", feature = "production")))]
-    let _retire_thread: JoinHandle<()> = {
-        let staged = Arc::clone(&staged);
-        let last_retired = Arc::clone(&last_retired);
-        let store = Arc::clone(&ibd_store_v2_for_validation);
-        let mem_mtx = Arc::clone(&mem_mtx);
-        let utxo_flush_handles = Arc::clone(&utxo_flush_handles);
-        let max_ahead_live = Arc::clone(&max_ahead_live);
-        let storage_wm = Arc::clone(&storage_for_retire);
-        let ibd_mh = Arc::clone(&ibd_muhash_accumulator);
-        std::thread::Builder::new()
-            .name("ibd-retire".to_string())
-            .spawn(move || {
-                run_ibd_retire_loop_no_commitment(
-                    work_rx,
-                    staged,
-                    last_retired,
-                    store,
-                    storage_wm,
-                    mem_mtx,
-                    max_ahead_live,
-                    nominal_max_ahead,
-                    ibd_defer_flush,
-                    ibd_defer_checkpoint,
-                    max_utxo_flushes_under_pressure,
-                    utxo_flush_handles,
-                    retire_err_join,
-                    ibd_mh,
-                );
-            })
-            .expect("spawn IBD retire thread")
+    let mut _retire_dispatcher = {
+        let staged_outer = Arc::clone(&staged);
+        let store_outer = Arc::clone(&ibd_store_v2_for_validation);
+        let mem_mtx_outer = Arc::clone(&mem_mtx);
+        let utxo_flush_handles_outer = Arc::clone(&utxo_flush_handles);
+        let retire_flush_counter_outer = Arc::clone(&retire_flush_counter);
+        let max_ahead_live_outer = Arc::clone(&max_ahead_live);
+        let storage_wm_outer = Arc::clone(&storage_for_retire);
+        let ibd_mh_outer = Arc::clone(&ibd_muhash_accumulator);
+        let retire_err_outer = Arc::clone(&retire_err);
+        let mpo_outer = Arc::clone(&max_pending_ops);
+        let mpo_last_outer = Arc::clone(&max_pending_ops_last_adapt_ms);
+        super::retire_dispatcher::RetireDispatcher::spawn(
+            num_retire_shards,
+            start_height.saturating_sub(1),
+            |i, work_rx, local_last_retired, publisher| {
+                let staged = Arc::clone(&staged_outer);
+                let store = Arc::clone(&store_outer);
+                let mem_mtx = Arc::clone(&mem_mtx_outer);
+                let utxo_flush_handles = Arc::clone(&utxo_flush_handles_outer);
+                let retire_flush_counter = Arc::clone(&retire_flush_counter_outer);
+                let max_ahead_live = Arc::clone(&max_ahead_live_outer);
+                let storage_wm = Arc::clone(&storage_wm_outer);
+                let ibd_mh = Arc::clone(&ibd_mh_outer);
+                let retire_err = Arc::clone(&retire_err_outer);
+                let mpo = Arc::clone(&mpo_outer);
+                let mpo_last = Arc::clone(&mpo_last_outer);
+                std::thread::Builder::new()
+                    .name(format!("ibd-retire-{}", i))
+                    .spawn(move || {
+                        run_ibd_retire_loop_no_commitment(
+                            work_rx,
+                            staged,
+                            local_last_retired,
+                            publisher,
+                            store,
+                            storage_wm,
+                            mem_mtx,
+                            max_ahead_live,
+                            nominal_max_ahead,
+                            ibd_defer_flush,
+                            ibd_defer_checkpoint,
+                            max_utxo_flushes_under_pressure,
+                            utxo_flush_handles,
+                            retire_flush_counter,
+                            retire_err,
+                            ibd_mh,
+                            mpo,
+                            max_pending_ops_nominal,
+                            mpo_last,
+                        );
+                    })
+                    .expect("spawn IBD retire shard")
+            },
+        )
     };
+
+    // Public `last_retired` exposed to validation workers (for backpressure) and to all
+    // existing call-sites is the dispatcher's `global_last_retired = min(local across shards)`.
+    // For N=1 this is bit-identical to the old single atomic.
+    let last_retired: Arc<AtomicU64> = Arc::clone(_retire_dispatcher.global_last_retired());
 
     // ── N-parallel validation worker pool ───────────────────────────────────
     // `BLVM_IBD_MAX_PARALLEL` overrides. Otherwise default scales with **RAM**:
@@ -1041,43 +1381,6 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| 32_usize.clamp(n_validate_workers, 64))
         .max(n_validate_workers);
-    // Pending-ops backpressure: cap entries in `pending_shards` at a RAM-tier-derived limit.
-    // The retire thread drains pending one height at a time; without a cap, validation races
-    // ahead and accumulates millions of pending UTXO ops in RAM (~200 B/entry). At h=200 k on
-    // a 16 GiB host we observed 22.5 M ops (~4.6 GB) → OOM.
-    //
-    // Why entries instead of block-lag: ops/block varies wildly by chain era (150/block early,
-    // 8 000/block late), so a fixed block-lag cap is either useless or devastating depending on
-    // height. Entries map directly to memory.
-    //
-    // Defaults (override via BLVM_IBD_MAX_PENDING_OPS):
-    //   ≤16 GiB: 4 M  (~800 MB pending,  ~5% of RAM)
-    //   16–24 GiB: 8 M (~1.6 GB)
-    //   24–32 GiB: 16 M (~3.2 GB)
-    //   ≥32 GiB: unlimited (high-RAM hosts can absorb the full pipeline)
-    let max_pending_ops: usize = std::env::var("BLVM_IBD_MAX_PENDING_OPS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| {
-            let total_gb = (system_total_ram_mb + 512) / 1024;
-            if total_gb >= 32 {
-                0
-            } else if total_gb >= 24 {
-                16_000_000
-            } else if total_gb >= 16 {
-                8_000_000
-            } else if total_gb >= 12 {
-                6_000_000
-            } else {
-                4_000_000
-            }
-        });
-    if max_pending_ops > 0 {
-        info!(
-            "IBD: pending-ops backpressure active (max_pending_ops={})",
-            max_pending_ops
-        );
-    }
 
     info!(
         "IBD: n_validate_workers={} pipeline_depth={}",
@@ -1097,7 +1400,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         let pr = Arc::clone(&protocol);
         let st = Arc::clone(&ibd_store_v2_for_validation);
         let lr = Arc::clone(&last_retired);
-        let mpo = max_pending_ops;
+        let mpo = Arc::clone(&max_pending_ops);
         _validate_workers.push(
             std::thread::Builder::new()
                 .name(format!("ibd-validate-{}", i))
@@ -1227,7 +1530,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             let witnesses_storage_d: Arc<Vec<Vec<Witness>>> = if witnesses_d.is_empty() {
                 shared_empty_witness_stacks(block_arc_d.transactions.len())
             } else if witnesses_d.len() != block_arc_d.transactions.len() {
-                return match retire_thread_shutdown(work_tx, _retire_thread, &retire_err) {
+                return match retire_thread_shutdown(&mut _retire_dispatcher, &retire_err) {
                     Ok(()) => Err(anyhow::anyhow!(
                         "Witness count mismatch at height {}: {} witnesses for {} transactions",
                         h,
@@ -1334,7 +1637,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 prefetched: prefetched_utxos_d,
             });
             if job_send.is_err() {
-                return match retire_thread_shutdown(work_tx, _retire_thread, &retire_err) {
+                return match retire_thread_shutdown(&mut _retire_dispatcher, &retire_err) {
                     Ok(()) => Err(anyhow::anyhow!(
                         "IBD validate workers stopped (failed to send job at height {})",
                         h
@@ -1392,7 +1695,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     pending_results.insert(vres.height, vres);
                 }
                 Err(_) => {
-                    return match retire_thread_shutdown(work_tx, _retire_thread, &retire_err) {
+                    return match retire_thread_shutdown(&mut _retire_dispatcher, &retire_err) {
                         Ok(()) => Err(anyhow::anyhow!(
                             "IBD validate workers disconnected at height {}",
                             next_process_h
@@ -1474,7 +1777,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     } else {
                         Vec::new()
                     };
-                    if work_tx
+                    if _retire_dispatcher
                         .send(IbdRetireWork {
                             height: next_height,
                             blocks_buf: retire_blocks_buf,
@@ -1482,7 +1785,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         })
                         .is_err()
                     {
-                        return match retire_thread_shutdown(work_tx, _retire_thread, &retire_err) {
+                        return match retire_thread_shutdown(&mut _retire_dispatcher, &retire_err) {
                             Ok(()) => Err(anyhow::anyhow!(
                                 "IBD retire thread stopped (failed to send retire work at height {})",
                                 next_height
@@ -1631,8 +1934,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         );
                         let Some(handle) = flush_handles.pop_front() else {
                             return match retire_thread_shutdown(
-                                work_tx,
-                                _retire_thread,
+                                &mut _retire_dispatcher,
                                 &retire_err,
                             ) {
                                 Ok(()) => Err(anyhow::anyhow!(
@@ -1661,8 +1963,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             }
                             Ok(Err(e)) => {
                                 return match retire_thread_shutdown(
-                                    work_tx,
-                                    _retire_thread,
+                                    &mut _retire_dispatcher,
                                     &retire_err,
                                 ) {
                                     Ok(()) => Err(e),
@@ -1671,8 +1972,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             }
                             Err(e) => {
                                 return match retire_thread_shutdown(
-                                    work_tx,
-                                    _retire_thread,
+                                    &mut _retire_dispatcher,
                                     &retire_err,
                                 ) {
                                     Ok(()) => Err(anyhow::anyhow!(
@@ -1847,7 +2147,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     &utxo_for_dump,
                     &e,
                 );
-                return match retire_thread_shutdown(work_tx, _retire_thread, &retire_err) {
+                return match retire_thread_shutdown(&mut _retire_dispatcher, &retire_err) {
                     Ok(()) => Err(e),
                     Err(e2) => Err(e2),
                 };
@@ -2064,7 +2364,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         }
     }
     // Signal retire thread to finish, then take any last flush and join UTXO workers.
-    retire_thread_shutdown(work_tx, _retire_thread, &retire_err)?;
+    retire_thread_shutdown(&mut _retire_dispatcher, &retire_err)?;
 
     // Final UTXO flush: drain remaining pending ops, then join all in-flight handles.
     if let Some(pkg) = ibd_store_v2_for_validation.take_remaining_flush_package() {
@@ -2138,11 +2438,21 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     Ok(())
 }
 
+/// `local_last_retired` + `publisher`: see [`run_ibd_retire_loop_no_commitment`] — same
+/// sharding semantics. Commitment-tree updates happen on this shard's heights only; the
+/// commitment tree itself is `Mutex`-guarded, so multi-shard concurrent commitment
+/// updates serialize on that lock. With `BLVM_IBD_RETIRE_SHARDS=1` behavior is unchanged.
+///
+/// `max_pending_ops` + `max_pending_ops_nominal` + `max_pending_ops_last_adapt_ms`: the
+/// adaptive backpressure cap (see [`adapt_max_pending_ops_tick`]). Updated at most once
+/// per 500 ms from this loop, read by every validation worker.
 #[cfg(all(feature = "utxo-commitments", feature = "production"))]
+#[allow(clippy::too_many_arguments)]
 fn run_ibd_retire_loop_with_commitment(
     work_rx: mpsc::Receiver<IbdRetireWork>,
     staged: Arc<Mutex<BTreeMap<u64, Arc<UtxoDelta>>>>,
-    last_retired: Arc<AtomicU64>,
+    local_last_retired: Arc<AtomicU64>,
+    publisher: Arc<super::retire_dispatcher::GlobalProgressPublisher>,
     store: Arc<IbdUtxoStore>,
     storage_wm: Arc<Storage>,
     mem_mtx: Arc<Mutex<MemoryGuard>>,
@@ -2152,6 +2462,7 @@ fn run_ibd_retire_loop_with_commitment(
     ibd_defer_checkpoint: u64,
     max_utxo_flushes_under_pressure: usize,
     utxo_flush_handles: Arc<Mutex<VecDeque<JoinHandle<Result<()>>>>>,
+    retire_flush_counter: Arc<AtomicUsize>,
     retire_err: Arc<Mutex<Option<anyhow::Error>>>,
     blockstore: Arc<BlockStore>,
     commitment_tree: Option<
@@ -2159,6 +2470,9 @@ fn run_ibd_retire_loop_with_commitment(
     >,
     commitment_cstore: Option<Arc<crate::storage::commitment_store::CommitmentStore>>,
     ibd_muhash: Arc<Mutex<blvm_muhash::MuHash3072>>,
+    max_pending_ops: Arc<AtomicUsize>,
+    max_pending_ops_nominal: usize,
+    max_pending_ops_last_adapt_ms: Arc<AtomicU64>,
 ) {
     let mut keys_buf: Vec<OutPointKey> = Vec::new();
     let mut keys_seen = rustc_hash::FxHashSet::default();
@@ -2184,12 +2498,17 @@ fn run_ibd_retire_loop_with_commitment(
                         if evictable >= IBD_EMERGENCY_EVICT_MIN_UNPROTECTED {
                             store.evict_aggressive_for_rss();
                         }
-                        let flush_cap = last_retired.load(Ordering::Acquire);
-                        if let Some(pkg) = store.take_flush_batch_force_through(flush_cap) {
+                        // Idle-flush: drain everything. Workers push pending strictly
+                        // before dispatching retire work, so all in-pending entries are
+                        // safe to flush; the watermark may advance past local_last_retired
+                        // and that's correct (`retire_dispatcher.rs` invariant 2).
+                        let _ = local_last_retired;
+                        if let Some(pkg) = store.take_flush_batch_force() {
                             if let Err(e) = push_utxo_flush_from_retire(
                                 &store,
                                 &storage_wm,
                                 &utxo_flush_handles,
+                                &retire_flush_counter,
                                 0,
                                 max_utxo_flushes_under_pressure,
                                 pkg,
@@ -2265,15 +2584,31 @@ fn run_ibd_retire_loop_with_commitment(
                 return;
             }
         }
-        last_retired.store(h, Ordering::Release);
-        // Safe to release staged[h] now: store has the data and last_retired covers it, so the
-        // orchestrator's fold check `sh <= lr_now` will succeed for this height.
+        // Update this shard's local cursor and recompute the dispatcher-wide
+        // `global_last_retired = min(local across shards)`. With N=1 the publisher is a
+        // no-op trivially and the orchestrator's fold check `sh <= lr_now` sees the same
+        // value the original single-thread `last_retired.store(h)` would have produced.
+        publisher.publish(&local_last_retired, h);
+        // Adaptive cap tick: cheap (atomic loads + early-out via 500 ms throttle).
+        // `ibd_pressure_level_snapshot()` reads what `ibd_v2_retire_apply_utxo_delta`
+        // just published — same value the memory guard observed for this height.
+        adapt_max_pending_ops_tick(
+            &max_pending_ops,
+            max_pending_ops_nominal,
+            memory::ibd_pressure_level_snapshot(),
+            store.pending_len(),
+            &max_pending_ops_last_adapt_ms,
+        );
+        // Safe to release staged[h] now: store has the data and `local_last_retired`
+        // covers it. Each shard owns disjoint heights (height % N), so no two shards
+        // ever touch the same staged entry.
         staged.lock().remove(&h);
         if let Some(pkg) = opt_pkg {
             if let Err(e) = push_utxo_flush_from_retire(
                 &store,
                 &storage_wm,
                 &utxo_flush_handles,
+                &retire_flush_counter,
                 h,
                 max_utxo_flushes_under_pressure,
                 pkg,
@@ -2287,10 +2622,26 @@ fn run_ibd_retire_loop_with_commitment(
 }
 
 #[cfg(not(all(feature = "utxo-commitments", feature = "production")))]
+/// `local_last_retired` is the per-shard cursor (each shard owns one). Publishing through
+/// `publisher` recomputes `min(local_last_retired across shards)` and stores it as the
+/// dispatcher's `global_last_retired`. Validation workers and any caller that needs a
+/// contiguously-retired floor read the global value; this loop reads only its own local
+/// for `take_flush_batch_force_through(flush_cap)` — drain-by-height is monotone and the
+/// shared pending log is safe to drain past the floor (workers populate ops before
+/// dispatch sends `IbdRetireWork`, so all heights `<= local_last_retired` already have
+/// their ops in pending). With `BLVM_IBD_RETIRE_SHARDS=1` (the default), `local` and the
+/// dispatcher's global atomic are kept in lock-step by `publisher.publish` — behavior is
+/// identical to the pre-sharding single-thread retire.
+///
+/// `max_pending_ops` + `max_pending_ops_nominal` + `max_pending_ops_last_adapt_ms`: the
+/// adaptive backpressure cap (see [`adapt_max_pending_ops_tick`]). Updated at most once
+/// per 500 ms from this loop, read by every validation worker.
+#[allow(clippy::too_many_arguments)]
 fn run_ibd_retire_loop_no_commitment(
     work_rx: mpsc::Receiver<IbdRetireWork>,
     staged: Arc<Mutex<BTreeMap<u64, Arc<UtxoDelta>>>>,
-    last_retired: Arc<AtomicU64>,
+    local_last_retired: Arc<AtomicU64>,
+    publisher: Arc<super::retire_dispatcher::GlobalProgressPublisher>,
     store: Arc<IbdUtxoStore>,
     storage_wm: Arc<Storage>,
     mem_mtx: Arc<Mutex<MemoryGuard>>,
@@ -2300,8 +2651,12 @@ fn run_ibd_retire_loop_no_commitment(
     ibd_defer_checkpoint: u64,
     max_utxo_flushes_under_pressure: usize,
     utxo_flush_handles: Arc<Mutex<VecDeque<JoinHandle<Result<()>>>>>,
+    retire_flush_counter: Arc<AtomicUsize>,
     retire_err: Arc<Mutex<Option<anyhow::Error>>>,
     ibd_muhash: Arc<Mutex<blvm_muhash::MuHash3072>>,
+    max_pending_ops: Arc<AtomicUsize>,
+    max_pending_ops_nominal: usize,
+    max_pending_ops_last_adapt_ms: Arc<AtomicU64>,
 ) {
     let mut keys_buf: Vec<OutPointKey> = Vec::new();
     let mut keys_seen = rustc_hash::FxHashSet::default();
@@ -2332,12 +2687,17 @@ fn run_ibd_retire_loop_no_commitment(
                         if evictable >= IBD_EMERGENCY_EVICT_MIN_UNPROTECTED {
                             store.evict_aggressive_for_rss();
                         }
-                        let flush_cap = last_retired.load(Ordering::Acquire);
-                        if let Some(pkg) = store.take_flush_batch_force_through(flush_cap) {
+                        // Idle-flush: drain everything. Workers push pending strictly before
+                        // dispatching retire work, so any in-pending entry is for a block
+                        // that already finished validation; advancing the watermark past
+                        // local_last_retired is allowed (`retire_dispatcher.rs` invariant 2).
+                        let _ = local_last_retired;
+                        if let Some(pkg) = store.take_flush_batch_force() {
                             if let Err(e) = push_utxo_flush_from_retire(
                                 &store,
                                 &storage_wm,
                                 &utxo_flush_handles,
+                                &retire_flush_counter,
                                 0,
                                 max_utxo_flushes_under_pressure,
                                 pkg,
@@ -2374,14 +2734,30 @@ fn run_ibd_retire_loop_no_commitment(
             (p, r)
         };
         drop(mem);
-        last_retired.store(h, Ordering::Release);
-        // Safe to release staged[h] now: store has the data and last_retired covers it.
+        // Update this shard's local cursor and recompute the dispatcher-wide
+        // `global_last_retired = min(local across shards)`. With N=1 the publisher
+        // is a no-op trivially and `global == local` always.
+        publisher.publish(&local_last_retired, h);
+        // Adaptive cap tick: cheap (atomic loads + early-out via 500 ms throttle).
+        // `ibd_pressure_level_snapshot()` reads what `ibd_v2_retire_apply_utxo_delta`
+        // just published — same value the memory guard observed for this height.
+        adapt_max_pending_ops_tick(
+            &max_pending_ops,
+            max_pending_ops_nominal,
+            memory::ibd_pressure_level_snapshot(),
+            store.pending_len(),
+            &max_pending_ops_last_adapt_ms,
+        );
+        // Safe to release staged[h] now: store has the data and `local_last_retired`
+        // covers it. Each shard owns disjoint heights (height % N), so no two shards
+        // ever touch the same staged entry.
         staged.lock().remove(&h);
         if let Some(pkg) = opt_pkg {
             if let Err(e) = push_utxo_flush_from_retire(
                 &store,
                 &storage_wm,
                 &utxo_flush_handles,
+                &retire_flush_counter,
                 h,
                 max_utxo_flushes_under_pressure,
                 pkg,
@@ -2391,5 +2767,158 @@ fn run_ibd_retire_loop_no_commitment(
                 return;
             }
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests for pure-logic helpers in this file. The retire-loop bodies themselves
+// drive too much shared state (`IbdUtxoStore`, `MemoryGuard`, RocksDB, …) to be
+// meaningfully unit-tested here; integration coverage belongs in the IBD smoke
+// tests. What we *can* lock down here is the controller policy.
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh_cap(initial: usize) -> Arc<AtomicUsize> {
+        Arc::new(AtomicUsize::new(initial))
+    }
+    fn fresh_last_adapt_zero() -> Arc<AtomicU64> {
+        Arc::new(AtomicU64::new(0))
+    }
+
+    /// Nominal=0 is the "backpressure off" tier (≥32 GiB). The controller must NEVER
+    /// re-engage backpressure adaptively, regardless of pressure level.
+    #[test]
+    fn adapt_nominal_zero_is_inert() {
+        let cap = fresh_cap(0);
+        let last = fresh_last_adapt_zero();
+        for level in [
+            PressureLevel::None,
+            PressureLevel::Elevated,
+            PressureLevel::Critical,
+            PressureLevel::Emergency,
+        ] {
+            adapt_max_pending_ops_tick(&cap, 0, level, 1_000_000, &last);
+            assert_eq!(cap.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    /// Emergency must aggressively shrink the cap (but respect floors).
+    #[test]
+    fn adapt_emergency_halves_cap() {
+        let cap = fresh_cap(8_000_000);
+        let last = fresh_last_adapt_zero();
+        adapt_max_pending_ops_tick(
+            &cap,
+            8_000_000,
+            PressureLevel::Emergency,
+            8_000_000,
+            &last,
+        );
+        let new = cap.load(Ordering::Relaxed);
+        assert!(new < 8_000_000, "Emergency must shrink");
+        assert!(new >= 100_000, "Emergency must respect 100k floor");
+    }
+
+    /// Critical multiplies by 0.75; floor `nominal/8` keeps it from collapsing.
+    #[test]
+    fn adapt_critical_multiplies_by_three_quarters() {
+        let cap = fresh_cap(8_000_000);
+        let last = fresh_last_adapt_zero();
+        adapt_max_pending_ops_tick(
+            &cap,
+            8_000_000,
+            PressureLevel::Critical,
+            8_000_000,
+            &last,
+        );
+        let new = cap.load(Ordering::Relaxed);
+        assert!(new < 8_000_000);
+        assert!(new >= 8_000_000 / 8, "Critical must respect nominal/8 floor");
+    }
+
+    /// Elevated is a hold — cap unchanged.
+    #[test]
+    fn adapt_elevated_is_hold() {
+        let cap = fresh_cap(8_000_000);
+        let last = fresh_last_adapt_zero();
+        adapt_max_pending_ops_tick(
+            &cap,
+            8_000_000,
+            PressureLevel::Elevated,
+            8_000_000,
+            &last,
+        );
+        assert_eq!(cap.load(Ordering::Relaxed), 8_000_000);
+    }
+
+    /// `None` + low pending → grow by ~10%, never above `2 * nominal`.
+    #[test]
+    fn adapt_none_grows_when_drain_keeps_up() {
+        let cap = fresh_cap(8_000_000);
+        let last = fresh_last_adapt_zero();
+        adapt_max_pending_ops_tick(&cap, 8_000_000, PressureLevel::None, 100_000, &last);
+        let new = cap.load(Ordering::Relaxed);
+        assert!(new > 8_000_000, "None + drain-ahead must grow cap");
+        assert!(new <= 16_000_000, "Must respect 2*nominal cap");
+    }
+
+    /// `None` + high pending → hold (no point growing if validator is racing ahead).
+    #[test]
+    fn adapt_none_holds_when_pending_full() {
+        let cap = fresh_cap(8_000_000);
+        let last = fresh_last_adapt_zero();
+        adapt_max_pending_ops_tick(&cap, 8_000_000, PressureLevel::None, 7_000_000, &last);
+        assert_eq!(cap.load(Ordering::Relaxed), 8_000_000);
+    }
+
+    /// Throttle: if `last_adapt_ms` is recent, the call is a no-op.
+    #[test]
+    fn adapt_throttle_skips_recent_calls() {
+        let cap = fresh_cap(8_000_000);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let last = Arc::new(AtomicU64::new(now_ms));
+        adapt_max_pending_ops_tick(
+            &cap,
+            8_000_000,
+            PressureLevel::Emergency,
+            8_000_000,
+            &last,
+        );
+        assert_eq!(cap.load(Ordering::Relaxed), 8_000_000);
+    }
+
+    /// Repeated Emergency ticks (with throttle reset) must shrink toward — but never
+    /// below — `max(nominal/16, 100_000)`.
+    #[test]
+    fn adapt_emergency_respects_floor_under_repeat() {
+        let nominal = 8_000_000;
+        let cap = fresh_cap(nominal);
+        for _ in 0..50 {
+            let last = fresh_last_adapt_zero();
+            adapt_max_pending_ops_tick(
+                &cap,
+                nominal,
+                PressureLevel::Emergency,
+                nominal,
+                &last,
+            );
+        }
+        let final_cap = cap.load(Ordering::Relaxed);
+        assert!(
+            final_cap >= 100_000,
+            "must respect hard floor (got {})",
+            final_cap
+        );
+        assert!(
+            final_cap <= nominal / 8,
+            "must shrink well below nominal (got {} for nominal {})",
+            final_cap,
+            nominal
+        );
     }
 }

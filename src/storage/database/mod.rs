@@ -1129,6 +1129,140 @@ pub mod rocksdb_impl {
         db: Arc<DB>,
     }
 
+    /// GC orphan `.sst` files left behind by prior crashes / SIGKILLs / autorepair runs.
+    ///
+    /// **Why:** with WAL disabled for IBD (per-CF) and crashes leaving partial state, RocksDB's
+    /// own bootstrap can leave SSTs on disk that are not in any live MANIFEST. Across many IBD
+    /// attempts, this accumulates: one workload here had 5 016 SST files / 333 GB on disk where
+    /// only ~200 were live. The dead files don't affect correctness but **do** affect
+    /// performance: they sit in the same dir, occupy inodes, and (because they were closed at
+    /// different times) inflate the working set the OS has to track.
+    ///
+    /// **Safety:** uses RocksDB's own `live_files()` (the canonical "files referenced by the
+    /// MANIFEST" list) as the keep-set. Anything `.sst` on disk that is NOT in that set is
+    /// **moved** (not deleted) to a sibling quarantine dir `<db_path>_orphan_quarantine_<ts>/`
+    /// — so even if there is a bug here, the user can move them back. RocksDB itself does NOT
+    /// recurse into subdirectories of the data dir, so the quarantine is invisible to it.
+    ///
+    /// **When:** runs once on open, before any read/write traffic. Skipped entirely when
+    /// `BLVM_DISABLE_SST_GC=1` (escape hatch for diagnostics). On a healthy DB this is a few ms
+    /// (one `live_files()` call + one `read_dir()` set-difference).
+    fn gc_orphaned_ssts(db: &DB, db_path: &Path) -> Result<(usize, u64)> {
+        if std::env::var("BLVM_DISABLE_SST_GC").map(|v| v == "1").unwrap_or(false) {
+            tracing::info!("[ROCKSDB] orphan-SST GC: disabled via BLVM_DISABLE_SST_GC=1");
+            return Ok((0, 0));
+        }
+
+        // Build the keep-set from RocksDB's MANIFEST-driven live-files list.
+        // `LiveFile::name` is the basename with a leading `/` (e.g. `/000123.sst`).
+        let live_files = match db.live_files() {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    "[ROCKSDB] orphan-SST GC: live_files() failed ({}); skipping (DB will manage its own files)",
+                    e
+                );
+                return Ok((0, 0));
+            }
+        };
+        let live_set: std::collections::HashSet<String> = live_files
+            .iter()
+            .map(|f| f.name.trim_start_matches('/').to_string())
+            .collect();
+
+        // Walk db_path looking for `.sst` files not in the live set.
+        let mut orphans: Vec<(std::path::PathBuf, String, u64)> = Vec::new();
+        let read_dir = match std::fs::read_dir(db_path) {
+            Ok(it) => it,
+            Err(e) => {
+                tracing::warn!(
+                    "[ROCKSDB] orphan-SST GC: cannot read {} ({}); skipping",
+                    db_path.display(),
+                    e
+                );
+                return Ok((0, 0));
+            }
+        };
+        for entry in read_dir.flatten() {
+            let name_os = entry.file_name();
+            let name = name_os.to_string_lossy();
+            if !name.ends_with(".sst") {
+                continue;
+            }
+            if live_set.contains(name.as_ref()) {
+                continue;
+            }
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            orphans.push((entry.path(), name.into_owned(), size));
+        }
+
+        if orphans.is_empty() {
+            tracing::info!(
+                "[ROCKSDB] orphan-SST GC: clean ({} live SSTs, no orphans)",
+                live_set.len()
+            );
+            return Ok((0, 0));
+        }
+
+        // Quarantine, don't delete. Sibling of db_path; new dir per run (timestamped) so
+        // multiple GC runs don't clobber prior orphan sets.
+        let parent = db_path.parent().unwrap_or_else(|| Path::new("."));
+        let basename = db_path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "rocksdb".to_string());
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let quarantine = parent.join(format!("{}_orphan_quarantine_{}", basename, ts));
+        if let Err(e) = std::fs::create_dir_all(&quarantine) {
+            tracing::warn!(
+                "[ROCKSDB] orphan-SST GC: cannot create quarantine dir {} ({}); leaving orphans in place",
+                quarantine.display(),
+                e
+            );
+            return Ok((0, 0));
+        }
+
+        let mut moved = 0usize;
+        let mut total_bytes = 0u64;
+        for (src, name, size) in orphans.iter() {
+            let dst = quarantine.join(name);
+            // `rename` is atomic on a single filesystem (the common case — quarantine is a
+            // sibling of `db_path`). Cross-device fallback (copy+remove) is rare on a sane
+            // setup; if rename fails for any reason we leave the orphan in place rather than
+            // risking a partial copy that doubles disk usage. Operator can rerun later or
+            // delete manually.
+            match std::fs::rename(src, &dst) {
+                Ok(()) => {
+                    moved += 1;
+                    total_bytes += size;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[ROCKSDB] orphan-SST GC: failed to quarantine {} ({}); leaving in place",
+                        src.display(),
+                        e
+                    );
+                }
+            }
+        }
+
+        tracing::warn!(
+            "[ROCKSDB] orphan-SST GC: moved {} orphan SST(s) ({:.1} MB) to {}; live SSTs: {}",
+            moved,
+            total_bytes as f64 / (1024.0 * 1024.0),
+            quarantine.display(),
+            live_set.len()
+        );
+        tracing::warn!(
+            "[ROCKSDB] orphan-SST GC: review and `rm -rf {}` once you confirm the DB opens cleanly",
+            quarantine.display()
+        );
+        Ok((moved, total_bytes))
+    }
+
     impl RocksDBDatabase {
         /// Create a new RocksDB database
         pub fn new<P: AsRef<Path>>(
@@ -1468,32 +1602,46 @@ pub mod rocksdb_impl {
                 // and the data block cache is sized to handle IBD read traffic adequately.
                 o.set_block_based_table_factory(&bbo);
                 let wb = if total_ram_gb >= 32 {
-                    512
-                } else if total_ram_gb >= 24 {
                     256
+                } else if total_ram_gb >= 24 {
+                    128
                 } else if total_ram_gb >= 16 {
-                    // 64 MB × 2 memtables = 128 MB peak. Previous 96 MB × 3 = 288 MB was
-                    // pushing RSS close to swap on 16 GB hosts. Smaller memtable means more
-                    // frequent L0 flushes but much less in-memory buffering.
+                    // 64 MB × 2 = 128 MB peak. The earlier bump to 192 × 3 = 576 MB pushed
+                    // 16 GB hosts into swap (RSS hit ~12 GB at h~200k → 2.5 GB swap → page
+                    // faults stalled validation workers, BPS dropped from 700 → 100). The
+                    // micro-SST/L0 churn that motivated the bump is now solved at the
+                    // application layer by the retire-side flush batching (see
+                    // `retire_flush_batch_size` in validation_loop.rs) which makes each
+                    // physical flush 8× larger on the same memtable budget.
                     64
                 } else {
                     8
                 };
                 o.set_write_buffer_size(wb * 1024 * 1024);
-                let mwb = if total_ram_gb >= 16 { 2 } else { 2 };
-                o.set_max_write_buffer_number(mwb);
+                o.set_max_write_buffer_number(2);
                 o.set_min_write_buffer_number_to_merge(1);
-                // L0 trigger: 16 × 64 MB = 1 GB of L0 data before compaction on 16 GB hosts.
-                // Previous trigger of 64 caused a single 6.1 GB compaction burst (64 × 96 MB SSTs
-                // merged simultaneously), spiking RSS by 3.4 GB at h=254k and triggering swap.
-                // 16 files → each compaction uses ~200 MB of merge-sort RAM, no spike.
-                let l0_trigger = if total_ram_gb >= 32 {
-                    64
-                } else if total_ram_gb >= 16 {
-                    16
-                } else {
-                    8
-                };
+                // L0 trigger: tunes how many L0 SSTs accumulate before compaction kicks in.
+                // 16 GB host default raised 16 → 32 because the previous setting (slowdown=64,
+                // stop=128) wedged retire at h~183k: with retire flushing ~10 small SSTs/sec
+                // and 3 compactor threads, L0 climbed past 64 and RocksDB emitted
+                // WaitUntilFlushWouldNotStallWrites; pending grew to the cap and IBD froze.
+                // 32 (slowdown=128, stop=256) gives RocksDB headroom to absorb retire's burst
+                // rate; the 6.1 GB compaction burst that motivated the old 16-cap was at
+                // l0=64 with 96 MB write_buffer (96*64=6144 MB merge); current write_buffer is
+                // 64 MB so 32×64 = 2 GB merge — well within the 8.8 GB RSS budget on a 16 GB host.
+                // Override via BLVM_ROCKSDB_IBD_UTXOS_L0_TRIGGER if the workload changes.
+                let l0_trigger: i32 = std::env::var("BLVM_ROCKSDB_IBD_UTXOS_L0_TRIGGER")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(|| {
+                        if total_ram_gb >= 32 {
+                            64
+                        } else if total_ram_gb >= 16 {
+                            32
+                        } else {
+                            8
+                        }
+                    });
                 o.set_level_zero_file_num_compaction_trigger(l0_trigger);
                 // Scale slowdown/stop triggers proportionally to the new compact trigger.
                 o.set_level_zero_slowdown_writes_trigger(l0_trigger * 4);
@@ -1576,6 +1724,11 @@ pub mod rocksdb_impl {
             } else {
                 DB::open_cf_descriptors(&opts, &db_path, cfs)?
             };
+
+            // Reclaim disk space + drop file count from any prior crash / SIGKILL leftovers.
+            // Safe: uses RocksDB's own MANIFEST-driven `live_files()` as the keep-set.
+            // Skip-fast on a healthy DB (no orphans → one `live_files()` + one `read_dir`).
+            let _ = gc_orphaned_ssts(&db, &db_path);
 
             Ok(Self {
                 cache: std::sync::Mutex::new(Some(cache)),

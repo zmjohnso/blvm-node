@@ -20,9 +20,14 @@ mod headers;
 mod ibd_staging;
 mod memory;
 mod prefetch;
+#[cfg(feature = "production")]
+mod retire_dispatcher;
 mod types;
 #[cfg(feature = "production")]
 mod validation_loop;
+
+#[cfg(feature = "production")]
+pub(crate) use validation_loop::IbdRetireWork;
 
 use chunk_assigner::{create_chunks as create_chunks_impl, ChunkAssigner, ChunkGuard};
 
