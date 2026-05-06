@@ -483,7 +483,7 @@ jobs:
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
       - name: Docs
-        run: cargo doc --locked --no-deps --document-private-items
+        run: cargo doc --no-deps --document-private-items
 
   security:
     name: Security
