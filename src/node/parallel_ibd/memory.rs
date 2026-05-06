@@ -1269,11 +1269,7 @@ impl MemoryGuard {
         }
         // Hysteresis: only emit an adjustment if it moves at least 3% of current cap —
         // small jiggles waste the eviction-walk CPU when shrinking.
-        let delta = if target > current {
-            target - current
-        } else {
-            current - target
-        };
+        let delta = target.abs_diff(current);
         if delta < (current / 33).max(8 * 1024) {
             return None;
         }

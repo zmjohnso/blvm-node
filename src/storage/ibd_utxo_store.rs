@@ -699,7 +699,7 @@ impl IbdUtxoStore {
             if recent.contains(&k) {
                 continue;
             }
-            if self.protected_heights.len() > 0 {
+            if !self.protected_heights.is_empty() {
                 let v = r.value();
                 if v.block_height != UNPROTECTED_HEIGHT
                     && self.protected_heights.contains(&v.block_height)
@@ -1048,7 +1048,7 @@ impl IbdUtxoStore {
     pub(crate) fn maybe_evict_tl(&self) {
         thread_local! {
             static TL_EVICT_SCRATCH: std::cell::RefCell<Vec<(OutPointKey, u64)>> =
-                std::cell::RefCell::new(Vec::new());
+                const { std::cell::RefCell::new(Vec::new()) };
         }
         TL_EVICT_SCRATCH.with(|cell| {
             self.maybe_evict(&mut cell.borrow_mut());
@@ -1472,7 +1472,6 @@ impl IbdUtxoStore {
             }
             if ibd_per_op_muhash_enabled() {
                 if let Some(mhref) = muhash.as_mut() {
-                    let mh: &mut MuHash3072 = *mhref;
                     // Hot path: ~200 k rows per flush. The previous `*mh = mh.clone().insert(&pre)`
                     // form cloned the running MuHash (768 B = two `Num3072`) per row → ~150 MB of
                     // ephemeral allocations per flush, all under the muhash mutex that other flush
@@ -1488,7 +1487,7 @@ impl IbdUtxoStore {
                                         })?;
                                 let op = key_to_outpoint(key);
                                 let pre = utxo_muhash_preimage_ibd(&op, &utxo);
-                                mh.insert_mut(&pre);
+                                mhref.insert_mut(&pre);
                             }
                             None => {
                                 // Persisted `ibd_utxos` has no row: the outpoint never made it to disk as an
@@ -1508,7 +1507,7 @@ impl IbdUtxoStore {
                                     })?;
                                 let op = key_to_outpoint(key);
                                 let pre = utxo_muhash_preimage_ibd(&op, &utxo);
-                                mh.remove_mut(&pre);
+                                mhref.remove_mut(&pre);
                             }
                         }
                     }

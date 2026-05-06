@@ -27,6 +27,9 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: '1'
   CARGO_INCREMENTAL: '1'
+  # Shared target dir for build-dev → test/clippy/docs within the same run.
+  # All four jobs run on [self-hosted, Linux, X64, builds] runners that share /tmp.
+  BLVM_BUILD_TARGET: /tmp/gh-blvm-node-build/${{ github.run_id }}/target
 
 jobs:
   setup:
@@ -114,9 +117,79 @@ jobs:
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
 
+  build-dev:
+    name: Build (dev, shared)
+    needs: setup
+    runs-on: [self-hosted, Linux, X64, builds]
+    if: |
+      (github.event_name != 'push' || github.event.head_commit == null ||
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]')))
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Strip [patch.crates-io] for crates.io-only CI
+        uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Clean leftover path overrides
+        run: |
+          if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
+          if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
+          if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
+          if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
+
+      - name: Install tidesdb native dependencies
+        run: |
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
+            sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
+          elif command -v pacman >/dev/null 2>&1; then
+            sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
+          fi
+
+      - name: Isolate CARGO_HOME for this runner
+        run: |
+          mkdir -p "${RUNNER_TEMP}/cargo"
+          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
+
+      - name: Cache
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: bind-env
+          cache-key: ${{ needs.setup.outputs.cache-key }}
+
+      - name: Restore Cargo cache
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: restore
+
+      - name: Install Rust
+        uses: BTCDecoded/rust-ci/install-rust-toolchain@main
+
+      - name: Compile (lib + bins + test binaries)
+        # Build everything once into a shared /tmp dir keyed by run ID.
+        # test/clippy/docs jobs point CARGO_TARGET_DIR at the same path and
+        # find pre-built artifacts — no recompile.
+        env:
+          CARGO_TARGET_DIR: ${{ env.BLVM_BUILD_TARGET }}
+        run: cargo test --no-run
+
+      - name: Save Cargo cache
+        if: always()
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: save
+
+      - name: Prune old runner caches
+        if: always()
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: prune
+
   test:
     name: Test
-    needs: setup
+    needs: [setup, build-dev]
     runs-on: [self-hosted, Linux, X64, builds]
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
@@ -172,12 +245,11 @@ jobs:
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
       - name: Run tests
-        run: |
-          # Run tests only (no coverage) for fast PR feedback
-          # Coverage runs separately in coverage.yml workflow
-          # Default crate features only (see Cargo.toml [features].default) — not --all-features
-          # CI strips [patch.crates-io]; crates resolve from crates.io like downstream consumers (no Cargo.lock committed).
-          cargo test
+        # build-dev already compiled everything into BLVM_BUILD_TARGET; cargo test
+        # finds the pre-built binaries and only executes them.
+        env:
+          CARGO_TARGET_DIR: ${{ env.BLVM_BUILD_TARGET }}
+        run: cargo test
       
       - name: Save Cargo cache
         if: always()
@@ -193,7 +265,7 @@ jobs:
 
   clippy:
     name: Clippy
-    needs: setup
+    needs: [setup, build-dev]
     runs-on: [self-hosted, Linux, X64, builds]
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
@@ -250,6 +322,8 @@ jobs:
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
       - name: Run clippy
+        env:
+          CARGO_TARGET_DIR: ${{ env.BLVM_BUILD_TARGET }}
         run: |
           if ! cargo clippy --version >/dev/null 2>&1; then
             echo "Skipping Clippy (cargo-clippy not installed for the active toolchain)"
@@ -426,7 +500,7 @@ jobs:
 
   docs:
     name: Docs
-    needs: setup
+    needs: [setup, build-dev]
     runs-on: [self-hosted, Linux, X64, builds]
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
@@ -483,6 +557,8 @@ jobs:
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
       - name: Docs
+        env:
+          CARGO_TARGET_DIR: ${{ env.BLVM_BUILD_TARGET }}
         run: cargo doc --no-deps --document-private-items
 
   security:
@@ -689,8 +765,9 @@ jobs:
 
   build:
     name: Build
-    needs: 
+    needs:
       - setup
+      - build-dev
       - test
       - clippy
       - fmt
@@ -706,6 +783,7 @@ jobs:
     if: |
       always() &&
       needs.setup.result == 'success' &&
+      needs.build-dev.result == 'success' &&
       (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch') &&
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -786,7 +864,7 @@ jobs:
 
   release:
     name: Release
-    needs: [build, test, clippy, fmt, docs, security, verify, fuzz-build, fuzz]
+    needs: [build, build-dev, test, clippy, fmt, docs, security, verify, fuzz-build, fuzz]
     runs-on: [self-hosted, Linux, X64, builds]
     if: |
       always() &&

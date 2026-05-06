@@ -774,15 +774,14 @@ impl Node {
                     };
 
                 #[cfg(feature = "production")]
-                if watermark_val > 0 {
-                    if std::env::var("BLVM_VERIFY_IBD_UTXO_MUHASH")
+                if watermark_val > 0
+                    && std::env::var("BLVM_VERIFY_IBD_UTXO_MUHASH")
                         .map(|v| v == "1")
                         .unwrap_or(false)
-                    {
-                        crate::storage::ibd_utxo_muhash::verify_ibd_utxo_muhash_startup(
-                            self.storage.as_ref(),
-                        )?;
-                    }
+                {
+                    crate::storage::ibd_utxo_muhash::verify_ibd_utxo_muhash_startup(
+                        self.storage.as_ref(),
+                    )?;
                 }
 
                 let effective_tip = chain_tip.min(watermark_val);

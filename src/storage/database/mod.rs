@@ -1218,7 +1218,7 @@ pub mod rocksdb_impl {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let quarantine = parent.join(format!("{}_orphan_quarantine_{}", basename, ts));
+        let quarantine = parent.join(format!("{basename}_orphan_quarantine_{ts}"));
         if let Err(e) = std::fs::create_dir_all(&quarantine) {
             tracing::warn!(
                 "[ROCKSDB] orphan-SST GC: cannot create quarantine dir {} ({}); leaving orphans in place",
@@ -1330,8 +1330,6 @@ pub mod rocksdb_impl {
             // without falling behind into L0 stalls; ~3*64=192 MB compaction RSS is tolerable.
             let default_compactions = if total_ram_gb >= 32 {
                 4
-            } else if total_ram_gb >= 24 {
-                3
             } else if total_ram_gb >= 16 {
                 3
             } else {
@@ -1339,8 +1337,6 @@ pub mod rocksdb_impl {
             };
             let default_flushes = if total_ram_gb >= 32 {
                 4
-            } else if total_ram_gb >= 24 {
-                2
             } else if total_ram_gb >= 16 {
                 2
             } else {
@@ -1636,7 +1632,7 @@ pub mod rocksdb_impl {
                 let l0_trigger: i32 = std::env::var("BLVM_ROCKSDB_IBD_UTXOS_L0_TRIGGER")
                     .ok()
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or_else(|| {
+                    .unwrap_or({
                         if total_ram_gb >= 32 {
                             64
                         } else if total_ram_gb >= 16 {
@@ -1672,8 +1668,6 @@ pub mod rocksdb_impl {
                 o.set_block_based_table_factory(&bbo);
                 let wb = if total_ram_gb >= 32 {
                     64
-                } else if total_ram_gb >= 24 {
-                    32
                 } else if total_ram_gb >= 16 {
                     32
                 } else {

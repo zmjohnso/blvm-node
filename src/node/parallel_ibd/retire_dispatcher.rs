@@ -97,9 +97,9 @@ impl RetireDispatcher {
         });
 
         let mut shards = Vec::with_capacity(n);
-        for i in 0..n {
+        for (i, cursor) in local_cursors.iter().enumerate().take(n) {
             let (tx, rx) = mpsc::channel::<IbdRetireWork>();
-            let handle = spawn_thread(i, rx, Arc::clone(&local_cursors[i]), Arc::clone(&publisher));
+            let handle = spawn_thread(i, rx, Arc::clone(cursor), Arc::clone(&publisher));
             shards.push(DispatcherShard {
                 tx: Some(tx),
                 handle: Some(handle),

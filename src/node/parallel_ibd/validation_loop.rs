@@ -1227,7 +1227,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 let mpo = Arc::clone(&mpo_outer);
                 let mpo_last = Arc::clone(&mpo_last_outer);
                 std::thread::Builder::new()
-                    .name(format!("ibd-retire-{}", i))
+                    .name(format!("ibd-retire-{i}"))
                     .spawn(move || {
                         run_ibd_retire_loop_with_commitment(
                             work_rx,
@@ -1287,7 +1287,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 let mpo = Arc::clone(&mpo_outer);
                 let mpo_last = Arc::clone(&mpo_last_outer);
                 std::thread::Builder::new()
-                    .name(format!("ibd-retire-{}", i))
+                    .name(format!("ibd-retire-{i}"))
                     .spawn(move || {
                         run_ibd_retire_loop_no_commitment(
                             work_rx,
@@ -1397,7 +1397,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         let mpo = Arc::clone(&max_pending_ops);
         _validate_workers.push(
             std::thread::Builder::new()
-                .name(format!("ibd-validate-{}", i))
+                .name(format!("ibd-validate-{i}"))
                 .spawn(move || run_validation_worker_shared(rx, tx, pi, bs, pr, st, lr, mpo))
                 .expect("spawn IBD validate worker"),
         );
@@ -1412,12 +1412,11 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         // require sequential BIP30 state propagation — force depth=1 to serialize through them.
         // Otherwise pipeline_depth controls how far ahead the dispatcher can run, while
         // n_validate_workers controls how many of those in-flight blocks execute concurrently.
-        let pipeline_depth_live: usize =
-            if next_validation_height >= 91710 && next_validation_height <= 91855 {
-                1
-            } else {
-                n_pipeline_depth
-            };
+        let pipeline_depth_live: usize = if (91710..=91855).contains(&next_validation_height) {
+            1
+        } else {
+            n_pipeline_depth
+        };
 
         while in_flight.len() < pipeline_depth_live {
             let is_first = in_flight.is_empty();
@@ -2557,7 +2556,7 @@ fn run_ibd_retire_loop_with_commitment(
                 &mut keys_buf,
                 &mut keys_seen,
                 &mut evict_scratch,
-                &mut *mem,
+                &mut mem,
                 &max_ahead_live,
                 nominal_max_ahead,
                 ibd_defer_flush,
@@ -2719,7 +2718,7 @@ fn run_ibd_retire_loop_no_commitment(
                 &mut keys_buf,
                 &mut keys_seen,
                 &mut evict_scratch,
-                &mut *mem,
+                &mut mem,
                 &max_ahead_live,
                 nominal_max_ahead,
                 ibd_defer_flush,
