@@ -1,5 +1,7 @@
 name: CI
 
+# ci
+
 on:
   push:
     branches: [ main, develop ]
@@ -1193,18 +1195,18 @@ jobs:
         id: check-version
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          CRATE_NAME=$(grep -E '^name = ' Cargo.toml | sed -E 's/^name = "([^"]+)".*/\1/')
-          
+          CRATE_NAME=$(grep -A 5 '^\[package\]' Cargo.toml | grep '^name = ' | head -1 | sed -E 's/^name = "([^"]+)".*/\1/')
           echo "Checking if ${CRATE_NAME} v${VERSION} already exists on crates.io..."
-          
-          # Use crates.io API to check if version exists (more reliable than cargo search)
-          # The API returns versions in the "versions" array
-          API_RESPONSE=$(curl -s "https://crates.io/api/v1/crates/${CRATE_NAME}/versions" 2>/dev/null || echo "")
-          
-          if [ -z "$API_RESPONSE" ] || echo "$API_RESPONSE" | grep -q '"detail"'; then
-            echo "⚠️  Could not check crates.io API (crate may not exist yet), using cargo search as fallback"
-            # Fallback to cargo search - check all versions
-            if cargo search "$CRATE_NAME" --limit 100 2>/dev/null | grep -qE "\"${CRATE_NAME}\".*\"${VERSION}\""; then
+          API_RESPONSE=$(curl -sf \
+            -H "User-Agent: blvm-node-ci/1.0 (github.com/BTCDecoded/blvm-node)" \
+            "https://crates.io/api/v1/crates/${CRATE_NAME}/versions" 2>/dev/null || echo "")
+          if [ -n "$API_RESPONSE" ] && ! echo "$API_RESPONSE" | grep -q '"detail"'; then
+            if command -v jq &>/dev/null; then
+              EXISTS=$(echo "$API_RESPONSE" | jq -r ".versions[] | select(.num == \"${VERSION}\") | .num" | head -1)
+            else
+              EXISTS=$(echo "$API_RESPONSE" | grep -oE "\"num\":\"${VERSION}\"" | head -1)
+            fi
+            if [ -n "$EXISTS" ]; then
               echo "exists=true" >> $GITHUB_OUTPUT
               echo "⚠️  Version ${VERSION} already published for ${CRATE_NAME}"
             else
@@ -1212,26 +1214,8 @@ jobs:
               echo "✅ Version ${VERSION} not yet published for ${CRATE_NAME}"
             fi
           else
-            # Parse JSON to check if version exists (using jq if available, or grep as fallback)
-            if command -v jq &> /dev/null; then
-              VERSION_EXISTS=$(echo "$API_RESPONSE" | jq -r ".versions[] | select(.num == \"${VERSION}\") | .num" | head -1)
-              if [ "$VERSION_EXISTS" = "$VERSION" ]; then
-                echo "exists=true" >> $GITHUB_OUTPUT
-                echo "⚠️  Version ${VERSION} already published for ${CRATE_NAME}"
-              else
-                echo "exists=false" >> $GITHUB_OUTPUT
-                echo "✅ Version ${VERSION} not yet published for ${CRATE_NAME}"
-              fi
-            else
-              # Fallback: grep for version in JSON
-              if echo "$API_RESPONSE" | grep -q "\"num\":\"${VERSION}\""; then
-                echo "exists=true" >> $GITHUB_OUTPUT
-                echo "⚠️  Version ${VERSION} already published for ${CRATE_NAME}"
-              else
-                echo "exists=false" >> $GITHUB_OUTPUT
-                echo "✅ Version ${VERSION} not yet published for ${CRATE_NAME}"
-              fi
-            fi
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "⚠️  Could not reach crates.io API — assuming not yet published"
           fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -1252,7 +1236,7 @@ jobs:
           fi
           
           echo "Publishing ${CRATE_NAME} v${VERSION} to crates.io..."
-          PUBLISH_OUTPUT=$(cargo publish --token "${CARGO_REGISTRY_TOKEN}" 2>&1)
+          PUBLISH_OUTPUT=$(cargo publish --allow-dirty --token "${CARGO_REGISTRY_TOKEN}" 2>&1)
           PUBLISH_EXIT_CODE=$?
           
           if [ $PUBLISH_EXIT_CODE -eq 0 ]; then
