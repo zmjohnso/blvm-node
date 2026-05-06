@@ -330,10 +330,10 @@ jobs:
             find "$TARGET/debug" -maxdepth 1 -type f -executable ! -name "*.so" ! -name "*.rlib" ! -name "*.d" \
               -delete 2>/dev/null || true
           fi
-          # Remove run dirs from previous workflow runs (older than 48h).
+          # Remove ALL run dirs except the current one — no mtime guard, stale dirs eat 10s of GB.
           find /tmp/gh-blvm-node-build -mindepth 1 -maxdepth 1 -type d \
             -not -name "${{ github.run_id }}" \
-            -mtime +2 -exec rm -rf {} + 2>/dev/null || true
+            -exec rm -rf {} + 2>/dev/null || true
 
       - name: Save Cargo cache
         if: always()
@@ -1480,4 +1480,25 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  teardown:
+    name: Teardown (cleanup runner disk)
+    runs-on: [self-hosted, Linux, X64, builds]
+    if: always()
+    needs: [build-dev, test, clippy, verify, fmt, docs, security, fuzz-build, fuzz, build]
+    steps:
+      - name: Delete current run target dir
+        run: |
+          RUN_DIR="/tmp/gh-blvm-node-build/${{ github.run_id }}"
+          if [ -d "$RUN_DIR" ]; then
+            echo "Removing $RUN_DIR ($(du -sh "$RUN_DIR" 2>/dev/null | cut -f1))"
+            rm -rf "$RUN_DIR"
+          fi
+          # Belt-and-suspenders: also remove any other leftover run dirs
+          find /tmp/gh-blvm-node-build -mindepth 1 -maxdepth 1 -type d \
+            -exec rm -rf {} + 2>/dev/null || true
+          # Clean fuzz temp dir
+          rm -rf /tmp/gh-fuzz-blvm-node 2>/dev/null || true
+          echo "=== disk after teardown ==="
+          df -h /
 
