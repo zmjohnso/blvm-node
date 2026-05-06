@@ -969,6 +969,10 @@ jobs:
     name: Release
     needs: [build, build-dev, test, clippy, fmt, docs, security, verify, fuzz-build, fuzz]
     runs-on: [self-hosted, Linux, X64, builds]
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     if: |
       always() &&
       needs.build.result == 'success' &&
