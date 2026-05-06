@@ -594,7 +594,11 @@ impl IbdUtxoStore {
             .min(self.cache.len().saturating_add(1))
     }
 
-    pub(crate) fn maybe_evict(&self, evict_scratch: &mut Vec<(OutPointKey, u64)>) {
+    /// Bounded-cache eviction sweep (retire hot path).
+    ///
+    /// Visible to integration tests / benches in `tests/` that mirror IBD timing; not a stable API.
+    #[doc(hidden)]
+    pub fn maybe_evict(&self, evict_scratch: &mut Vec<(OutPointKey, u64)>) {
         if self.max_entries_effective() == usize::MAX {
             return;
         }

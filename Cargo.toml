@@ -42,7 +42,20 @@ rocksdb = { version = "=0.24.0", optional = true }
 tidesdb = { git = "https://github.com/tidesdb/tidesdb-rs.git", rev = "2c128540b02400a538475d992a122d940eb93da3", optional = true }
 
 # Networking layer - EXACT VERSIONS for security
-tokio = { version = "=1.48.0", features = ["full", "rt-multi-thread"] }  # Updated for iroh 0.95 compatibility (requires ^1.44.1)
+# Explicit features avoid `full` (smaller graphs, clearer deps). Mirrors actual `tokio::` usage
+# (`rt-multi-thread`, `sync`, `time`, `net`, `fs`, `process`, `io-util`, `signal`, test macros).
+tokio = { version = "=1.48.0", features = [
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "net",
+    "io-util",
+    "fs",
+    "process",
+    "signal",
+] }
 tokio-util = { version = "=0.7.17", features = ["codec", "io"] }  # Updated for iroh 0.95 compatibility (requires ^0.7.14)
 futures = "=0.3.31"  # Updated for iroh 0.95 compatibility (requires ^0.3.31)
 # HTTP server - EXACT VERSIONS for security

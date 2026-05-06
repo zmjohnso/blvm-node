@@ -6,7 +6,7 @@ use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, 
 
 #[tokio::test]
 async fn test_mempool_stores_full_transactions() {
-    let mut mempool = MempoolManager::new();
+    let mempool = MempoolManager::new();
 
     // Create a test transaction
     let tx = Transaction {
@@ -40,7 +40,7 @@ async fn test_mempool_stores_full_transactions() {
 
 #[tokio::test]
 async fn test_mempool_get_prioritized_transactions() {
-    let mut mempool = MempoolManager::new();
+    let mempool = MempoolManager::new();
     let mut utxo_set = UtxoSet::default();
 
     // Create UTXO for input
@@ -118,7 +118,7 @@ async fn test_mempool_get_prioritized_transactions() {
 
 #[tokio::test]
 async fn test_mempool_remove_transaction() {
-    let mut mempool = MempoolManager::new();
+    let mempool = MempoolManager::new();
 
     let tx = Transaction {
         version: 1,
