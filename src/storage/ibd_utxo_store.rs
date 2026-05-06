@@ -28,16 +28,16 @@ use std::sync::atomic::{AtomicIsize, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use tracing::debug;
 
-/// Per-op MuHash maintenance during IBD retire is **off by default** because each delete
-/// requires a synchronous `disk.get(key)` lookup plus a 3072-bit modular multiplication —
-/// at ~700 ops/block on the retire critical path this caps drain throughput in the low
-/// thousands of ops/sec and starves validation. Set `BLVM_IBD_ENABLE_MUHASH=1` to opt back
-/// in (e.g. when correctness of the persisted UTXO commitment matters more than IBD speed).
+/// Per-op MuHash in [`Self::flush_prepared_package`] is **on by default** (running checkpoint
+/// matches durable UTXO rows). Each delete does a synchronous `disk.get(key)` for correctness
+/// vs create+spend folding — that can cap retire throughput on slow disks.
+///
+/// Set `BLVM_IBD_SKIP_PER_OP_MUHASH=1` (or `true`) to skip MuHash updates during IBD flush
+/// for throughput experiments only; checkpoints will not track the MuHash over `ibd_utxos`.
 fn ibd_per_op_muhash_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("BLVM_IBD_ENABLE_MUHASH")
-            .ok()
+    static SKIP: OnceLock<bool> = OnceLock::new();
+    !*SKIP.get_or_init(|| {
+        std::env::var("BLVM_IBD_SKIP_PER_OP_MUHASH")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
     })
@@ -1268,11 +1268,15 @@ impl IbdUtxoStore {
 
     /// Drain only pending ops whose stamped block height is `<= max_block_height_inclusive`.
     ///
-    /// **Invariant:** Validation workers may call [`Self::apply_utxo_delta`] for height H+k
-    /// before height H completes. Without this cap, an uncapped flush drain could persist
-    /// high-height mutations while lower heights are still outstanding only in RAM, advancing
-    /// `ibd_utxo_watermark` past a durable UTXO state that matches sequential consensus —
-    /// restart then fails with `UTXO not found` at H+1 (forensic failure mode).
+    /// **Height cap:** for callers that must not pull ops above a given block (tests, or any
+    /// pipeline that is *not* strictly height-ordered before `apply_utxo_delta`).
+    ///
+    /// **Parallel IBD:** the feeder applies [`Self::apply_utxo_delta`] in **strict ascending
+    /// block height** (`OrderedReadyBridge`), so ops are appended to `pending_shards` in consensus
+    /// order. Production retire therefore uses [`Self::maybe_take_flush_batch`] /
+    /// [`Self::take_flush_batch_force`] (`max_block_height_inclusive = u64::MAX`): draining the
+    /// full log is safe and avoids scanning retained “future-height” rows on every tick when
+    /// retire lags validation.
     fn drain_pending_through_height(
         &self,
         max_block_height_inclusive: u64,
@@ -1340,8 +1344,8 @@ impl IbdUtxoStore {
         }
     }
 
-    /// Convenience: flush entire pending log (no height cap). Prefer
-    /// [`Self::maybe_take_flush_batch_through`] in parallel IBD production paths.
+    /// Flush when `pending_log_size` crosses thresholds, draining **all** heights (`u64::MAX`).
+    /// Parallel IBD retire uses this: apply order is strict by height, so a full drain is safe.
     pub fn maybe_take_flush_batch(&self) -> Option<PendingFlushPackage> {
         self.maybe_take_flush_batch_through(u64::MAX)
     }
@@ -1365,8 +1369,7 @@ impl IbdUtxoStore {
         Some(pkg)
     }
 
-    /// Convenience: force-flush entire pending log. Prefer [`Self::take_flush_batch_force_through`]
-    /// in parallel IBD production paths.
+    /// Force-flush all pending ops (`u64::MAX` height bound). See [`Self::maybe_take_flush_batch`].
     pub fn take_flush_batch_force(&self) -> Option<PendingFlushPackage> {
         self.take_flush_batch_force_through(u64::MAX)
     }
@@ -1467,49 +1470,48 @@ impl IbdUtxoStore {
             if chunk.is_empty() {
                 continue;
             }
-            // Per-op MuHash is the dominant retire-thread cost (each delete is a disk read
-            // + 3072-bit modular multiplication). Skip entirely unless explicitly enabled.
             if ibd_per_op_muhash_enabled() {
                 if let Some(mhref) = muhash.as_mut() {
-                let mh: &mut MuHash3072 = *mhref;
-                // Hot path: ~200 k rows per flush. The previous `*mh = mh.clone().insert(&pre)`
-                // form cloned the running MuHash (768 B = two `Num3072`) per row → ~150 MB of
-                // ephemeral allocations per flush, all under the muhash mutex that other flush
-                // threads are blocked on. `insert_mut` / `remove_mut` (blvm-muhash 0.1.7+) keep
-                // the same arithmetic but mutate in place — same hash, no clone, less mutex hold.
-                for (key, value_opt) in chunk {
-                    match value_opt {
-                        Some((start, len)) => {
-                            let utxo: UTXO =
-                                bincode::deserialize(&slab[*start as usize..][..*len as usize])
-                                    .map_err(|e| {
-                                        anyhow::anyhow!("UTXO deserialize for muhash: {}", e)
+                    let mh: &mut MuHash3072 = *mhref;
+                    // Hot path: ~200 k rows per flush. The previous `*mh = mh.clone().insert(&pre)`
+                    // form cloned the running MuHash (768 B = two `Num3072`) per row → ~150 MB of
+                    // ephemeral allocations per flush, all under the muhash mutex that other flush
+                    // threads are blocked on. `insert_mut` / `remove_mut` in blvm-muhash keep
+                    // the same arithmetic but mutate in place — same hash, no clone, less mutex hold.
+                    for (key, value_opt) in chunk {
+                        match value_opt {
+                            Some((start, len)) => {
+                                let utxo: UTXO =
+                                    bincode::deserialize(&slab[*start as usize..][..*len as usize])
+                                        .map_err(|e| {
+                                            anyhow::anyhow!("UTXO deserialize for muhash: {}", e)
+                                        })?;
+                                let op = key_to_outpoint(key);
+                                let pre = utxo_muhash_preimage_ibd(&op, &utxo);
+                                mh.insert_mut(&pre);
+                            }
+                            None => {
+                                // Persisted `ibd_utxos` has no row: the outpoint never made it to disk as an
+                                // insert (e.g. create+spend folded in one flush batch → net delete). The disk
+                                // batch still applies the delete; MuHash over **durable** UTXOs must not remove
+                                // a coin that was never inserted there.
+                                let Some(disk_bytes) = self.disk.get(key.as_slice())? else {
+                                    debug!(
+                                        "IbdUtxoStore: MuHash skip delete (no SST row; net-no-op vs durable set), key_prefix={}",
+                                        hex::encode(&key[..8])
+                                    );
+                                    continue;
+                                };
+                                let utxo: UTXO =
+                                    bincode::deserialize(&disk_bytes).map_err(|e| {
+                                        anyhow::anyhow!("disk UTXO deserialize for muhash: {}", e)
                                     })?;
-                            let op = key_to_outpoint(key);
-                            let pre = utxo_muhash_preimage_ibd(&op, &utxo);
-                            mh.insert_mut(&pre);
-                        }
-                        None => {
-                            // Persisted `ibd_utxos` has no row: the outpoint never made it to disk as an
-                            // insert (e.g. create+spend folded in one flush batch → net delete). The disk
-                            // batch still applies the delete; MuHash over **durable** UTXOs must not remove
-                            // a coin that was never inserted there.
-                            let Some(disk_bytes) = self.disk.get(key.as_slice())? else {
-                                debug!(
-                                    "IbdUtxoStore: MuHash skip delete (no SST row; net-no-op vs durable set), key_prefix={}",
-                                    hex::encode(&key[..8])
-                                );
-                                continue;
-                            };
-                            let utxo: UTXO = bincode::deserialize(&disk_bytes).map_err(|e| {
-                                anyhow::anyhow!("disk UTXO deserialize for muhash: {}", e)
-                            })?;
-                            let op = key_to_outpoint(key);
-                            let pre = utxo_muhash_preimage_ibd(&op, &utxo);
-                            mh.remove_mut(&pre);
+                                let op = key_to_outpoint(key);
+                                let pre = utxo_muhash_preimage_ibd(&op, &utxo);
+                                mh.remove_mut(&pre);
+                            }
                         }
                     }
-                }
                 }
             }
             let mut b = self.disk.batch()?;

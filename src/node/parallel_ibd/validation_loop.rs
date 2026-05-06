@@ -183,7 +183,7 @@ pub(crate) fn ibd_v2_retire_apply_utxo_delta(
             LAST_IBD_HEAP_TRIM_WALL_MS.store(0, Ordering::Relaxed);
         }
     }
-    // Force-flush ONLY at Critical/Emergency. At Elevated we let `maybe_take_flush_batch_through` decide
+    // Force-flush ONLY at Critical/Emergency. At Elevated we let `maybe_take_flush_batch` decide
     // (it triggers at the normal threshold). Forcing a flush on every Elevated transition produced
     // a storm of tiny flushes (pending<10k) at h=366k onward, each followed by heap_trim — both
     // ate retire CPU and walloped BPS from 145 → 60. Critical/Emergency still force-flush because
@@ -231,15 +231,15 @@ pub(crate) fn ibd_v2_retire_apply_utxo_delta(
         const CRITICAL_MIN_FLUSH_OPS: usize = 1_000;
         let should_force =
             pressure_level == PressureLevel::Emergency || pending_now >= CRITICAL_MIN_FLUSH_OPS;
-        // `u64::MAX`: workers strictly push pending **before** dispatching retire work
-        // (`retire_dispatcher.rs` invariant 1), so any entry currently in pending is for a
-        // block that has already finished validation. Draining everything (no height filter)
-        // lets the retire thread skip the O(n) `drain_pending_through_height` scan that
-        // dominated retire CPU once workers ran ahead — at h=180 k pending reached 8.6 M and
-        // retire spent 85 % of its time iterating ~7.9 M not-yet-eligible entries per call.
-        // The flush package's `max_block_height` may exceed `local_last_retired` but the
-        // chain watermark is allowed to advance past `global_last_retired` (`retire_dispatcher.rs`
-        // invariant 2: watermark tracks worker production, not the contiguous retire floor).
+        // Full pending drain (`take_flush_batch_force` / `maybe_take_flush_batch`): the feeder
+        // applies UTXO deltas in strict ascending height (`OrderedReadyBridge`), so `pending_shards`
+        // only receives ops after each lower height has been applied — safe to flush without a
+        // per-retire-height cap. That avoids scanning millions of retained rows every tick when
+        // retire lags validation (see `IbdUtxoStore::drain_pending_through_height`).
+        // Workers also push pending before dispatching retire work (`retire_dispatcher.rs`
+        // invariant 1). The flush package's `max_block_height` may exceed `local_last_retired`;
+        // the chain watermark may advance past `global_last_retired` (invariant 2: watermark
+        // tracks worker production, not the contiguous retire floor).
         let batch = if should_force {
             store.take_flush_batch_force()
         } else {
@@ -818,9 +818,7 @@ fn adapt_max_pending_ops_tick(
             // unblock a worker if the cap dropped below the in-flight-block working set).
             (current / 2).max(nominal / 16).max(100_000)
         }
-        PressureLevel::Critical => {
-            (current * 3 / 4).max(nominal / 8).max(500_000)
-        }
+        PressureLevel::Critical => (current * 3 / 4).max(nominal / 8).max(500_000),
         PressureLevel::Elevated => current,
         PressureLevel::None => {
             // Grow only when retire is *clearly* ahead — pending_len well below current.
@@ -841,10 +839,8 @@ fn adapt_max_pending_ops_tick(
 
     if new != current {
         cap.store(new, Ordering::Relaxed);
-        if matches!(
-            pressure,
-            PressureLevel::Critical | PressureLevel::Emergency
-        ) || (pressure == PressureLevel::None && new > current)
+        if matches!(pressure, PressureLevel::Critical | PressureLevel::Emergency)
+            || (pressure == PressureLevel::None && new > current)
         {
             // Log meaningful transitions only — Elevated holds wouldn't appear here, and
             // None-with-no-change returns early. Helps correlate observed BPS dips with
@@ -1188,9 +1184,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             max_pending_ops_nominal
         );
     } else {
-        info!(
-            "IBD: pending-ops backpressure disabled (32 GiB+ tier — full pipeline fits in RAM)"
-        );
+        info!("IBD: pending-ops backpressure disabled (32 GiB+ tier — full pipeline fits in RAM)");
     }
 
     // Background retire dispatcher: 1..N retire threads, sharded by `height % N`.
@@ -2809,13 +2803,7 @@ mod tests {
     fn adapt_emergency_halves_cap() {
         let cap = fresh_cap(8_000_000);
         let last = fresh_last_adapt_zero();
-        adapt_max_pending_ops_tick(
-            &cap,
-            8_000_000,
-            PressureLevel::Emergency,
-            8_000_000,
-            &last,
-        );
+        adapt_max_pending_ops_tick(&cap, 8_000_000, PressureLevel::Emergency, 8_000_000, &last);
         let new = cap.load(Ordering::Relaxed);
         assert!(new < 8_000_000, "Emergency must shrink");
         assert!(new >= 100_000, "Emergency must respect 100k floor");
@@ -2826,16 +2814,13 @@ mod tests {
     fn adapt_critical_multiplies_by_three_quarters() {
         let cap = fresh_cap(8_000_000);
         let last = fresh_last_adapt_zero();
-        adapt_max_pending_ops_tick(
-            &cap,
-            8_000_000,
-            PressureLevel::Critical,
-            8_000_000,
-            &last,
-        );
+        adapt_max_pending_ops_tick(&cap, 8_000_000, PressureLevel::Critical, 8_000_000, &last);
         let new = cap.load(Ordering::Relaxed);
         assert!(new < 8_000_000);
-        assert!(new >= 8_000_000 / 8, "Critical must respect nominal/8 floor");
+        assert!(
+            new >= 8_000_000 / 8,
+            "Critical must respect nominal/8 floor"
+        );
     }
 
     /// Elevated is a hold — cap unchanged.
@@ -2843,13 +2828,7 @@ mod tests {
     fn adapt_elevated_is_hold() {
         let cap = fresh_cap(8_000_000);
         let last = fresh_last_adapt_zero();
-        adapt_max_pending_ops_tick(
-            &cap,
-            8_000_000,
-            PressureLevel::Elevated,
-            8_000_000,
-            &last,
-        );
+        adapt_max_pending_ops_tick(&cap, 8_000_000, PressureLevel::Elevated, 8_000_000, &last);
         assert_eq!(cap.load(Ordering::Relaxed), 8_000_000);
     }
 
@@ -2882,13 +2861,7 @@ mod tests {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let last = Arc::new(AtomicU64::new(now_ms));
-        adapt_max_pending_ops_tick(
-            &cap,
-            8_000_000,
-            PressureLevel::Emergency,
-            8_000_000,
-            &last,
-        );
+        adapt_max_pending_ops_tick(&cap, 8_000_000, PressureLevel::Emergency, 8_000_000, &last);
         assert_eq!(cap.load(Ordering::Relaxed), 8_000_000);
     }
 
@@ -2900,13 +2873,7 @@ mod tests {
         let cap = fresh_cap(nominal);
         for _ in 0..50 {
             let last = fresh_last_adapt_zero();
-            adapt_max_pending_ops_tick(
-                &cap,
-                nominal,
-                PressureLevel::Emergency,
-                nominal,
-                &last,
-            );
+            adapt_max_pending_ops_tick(&cap, nominal, PressureLevel::Emergency, nominal, &last);
         }
         let final_cap = cap.load(Ordering::Relaxed);
         assert!(

@@ -1,10 +1,20 @@
 //! Marker-driven IBD UTXO autorepair: after a validation/UTXO consistency failure we write
-//! `ibd_utxo_repair_required`. On the **next** startup we clear `ibd_utxos`, reset
-//! `ibd_utxo_watermark` to 0, **remove the marker**, and flush — the inconsistent state is fixed
-//! in one shot. Later restarts resume using normal `min(chain_tip, watermark)` logic instead of
-//! wiping `ibd_utxos` again after every interrupt mid-replay.
+//! `ibd_utxo_repair_required`. On the **next** startup we clear the marker and let the
+//! normal `chain_tip > watermark → replay` codepath restore consistency by re-validating
+//! the gap. The persisted `ibd_utxos` rows up to `watermark` are kept, so replay is bounded
+//! to roughly `flush_threshold` blocks — not the full chain.
 //!
-//! Set `BLVM_IBD_SKIP_AUTOREPAIR=1` to skip the wipe (marker remains until you delete it manually).
+//! **Default is non-destructive.** The previous default (full `ibd_utxos.clear()` +
+//! `watermark = 0`) cost ≥40 k blocks of re-validation per crash on real workloads even
+//! when the on-disk state was healthy below the watermark. The wipe-everything path is
+//! preserved behind `BLVM_IBD_AGGRESSIVE_REPAIR=1` for cases where corruption persists
+//! through replay (which would re-trigger the same error and re-set the marker).
+//!
+//! - `BLVM_IBD_SKIP_AUTOREPAIR=1`: do nothing (marker stays until deleted manually). Use
+//!   when you want to inspect on-disk state without any auto-action.
+//! - `BLVM_IBD_AGGRESSIVE_REPAIR=1`: pre-existing destructive wipe (`ibd_utxos.clear()` +
+//!   `watermark = 0`). Use only if the soft repair loops because corruption is below the
+//!   watermark.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -87,7 +97,7 @@ pub fn apply_ibd_utxo_autorepair_if_needed(
     if std::env::var("BLVM_IBD_SKIP_AUTOREPAIR").is_ok() {
         if ibd_utxo_repair_flag_present(data_dir) {
             warn!(
-                "IBD UTXO repair marker present but BLVM_IBD_SKIP_AUTOREPAIR is set — not clearing ibd_utxos"
+                "IBD UTXO repair marker present but BLVM_IBD_SKIP_AUTOREPAIR is set — leaving everything as-is"
             );
         }
         return Ok(());
@@ -95,16 +105,47 @@ pub fn apply_ibd_utxo_autorepair_if_needed(
     if !ibd_utxo_repair_flag_present(data_dir) {
         return Ok(());
     }
+
+    let aggressive = std::env::var("BLVM_IBD_AGGRESSIVE_REPAIR")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    if aggressive {
+        // Legacy destructive path: full wipe + watermark reset. Re-validates the entire
+        // chain from height 1. Only used now when the operator explicitly opts in because
+        // soft repair kept looping (i.e. corruption is below the watermark).
+        info!(
+            "IBD UTXO autorepair (aggressive): clearing ibd_utxos and forcing ibd_utxo_watermark to 0 \
+             (BLVM_IBD_AGGRESSIVE_REPAIR=1, marker was present)"
+        );
+        let tree = storage.open_tree("ibd_utxos")?;
+        tree.clear()?;
+        storage.chain().force_set_ibd_utxo_watermark(0)?;
+        storage.flush()?;
+        clear_ibd_utxo_repair_flag(data_dir)?;
+        warn!(
+            "IBD UTXO autorepair applied (aggressive); on-disk blocks kept; full re-validation will follow"
+        );
+        return Ok(());
+    }
+
+    // Default soft repair: preserve persisted ibd_utxos rows up to `watermark`. Replay
+    // (`chain_tip > watermark` → re-validate the gap) handles consistency. This bounds
+    // re-validation to ≈`flush_threshold` blocks instead of the full chain.
+    let watermark = storage
+        .chain()
+        .get_utxo_watermark()
+        .unwrap_or(None)
+        .unwrap_or(0);
     info!(
-        "IBD UTXO autorepair: clearing ibd_utxos and forcing ibd_utxo_watermark to 0 (marker was present)"
+        "IBD UTXO autorepair (soft): clearing repair marker; preserving ibd_utxos & watermark={} \
+         — replay (chain_tip > watermark) will reconcile any gap",
+        watermark
     );
-    let tree = storage.open_tree("ibd_utxos")?;
-    tree.clear()?;
-    storage.chain().force_set_ibd_utxo_watermark(0)?;
-    storage.flush()?;
     clear_ibd_utxo_repair_flag(data_dir)?;
     warn!(
-        "IBD UTXO autorepair applied; on-disk blocks kept; repair marker cleared — resume uses watermark vs chain tip"
+        "IBD UTXO autorepair (soft) applied; if the next IBD attempt re-trips the same UTXO error \
+         and sets the marker again, set BLVM_IBD_AGGRESSIVE_REPAIR=1 for the destructive wipe path"
     );
     Ok(())
 }
@@ -116,7 +157,10 @@ mod ibd_autorepair_tests {
     use tempfile::TempDir;
 
     #[test]
-    fn apply_autorepair_removes_marker_and_zeros_watermark() {
+    fn apply_autorepair_soft_preserves_state_clears_marker() {
+        // Default (no BLVM_IBD_AGGRESSIVE_REPAIR): marker is consumed but ibd_utxos and
+        // watermark are preserved. Replay (`chain_tip > watermark`) handles reconciliation.
+        let _aggressive_guard = AggressiveRepairEnvGuard::cleared();
         let dir = TempDir::new().unwrap();
         let data_dir = dir.path();
         let storage = Storage::new(data_dir).unwrap();
@@ -133,11 +177,56 @@ mod ibd_autorepair_tests {
 
         assert!(
             !ibd_utxo_repair_flag_present(data_dir),
-            "marker must be removed so later restarts do not wipe ibd_utxos again"
+            "marker must be removed so later restarts do not loop"
         );
+        assert_eq!(
+            storage.chain().get_utxo_watermark().unwrap(),
+            Some(999),
+            "soft repair must preserve watermark — replay handles tip>watermark gap"
+        );
+        assert!(
+            !tree.is_empty().unwrap(),
+            "soft repair must NOT wipe ibd_utxos — destructive wipe is opt-in via env"
+        );
+    }
+
+    #[test]
+    fn apply_autorepair_aggressive_wipes_state_on_env_flag() {
+        let _aggressive_guard = AggressiveRepairEnvGuard::set();
+        let dir = TempDir::new().unwrap();
+        let data_dir = dir.path();
+        let storage = Storage::new(data_dir).unwrap();
+
+        storage.chain().set_utxo_watermark(999).unwrap();
+        let tree = storage.open_tree("ibd_utxos").unwrap();
+        tree.insert(b"tkey", b"tval").unwrap();
+        storage.flush().unwrap();
+
+        set_ibd_utxo_repair_flag(data_dir).unwrap();
+        apply_ibd_utxo_autorepair_if_needed(&storage, data_dir).unwrap();
+
+        assert!(!ibd_utxo_repair_flag_present(data_dir));
         assert_eq!(storage.chain().get_utxo_watermark().unwrap(), Some(0));
         assert!(tree.is_empty().unwrap());
     }
+
+    /// Lock around `BLVM_IBD_AGGRESSIVE_REPAIR` so the soft/aggressive tests don't race.
+    /// Cargo runs tests in parallel by default; an env-set in one test would otherwise leak
+    /// into the other.
+    struct AggressiveRepairEnvGuard;
+    impl AggressiveRepairEnvGuard {
+        fn set() -> std::sync::MutexGuard<'static, ()> {
+            let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            std::env::set_var("BLVM_IBD_AGGRESSIVE_REPAIR", "1");
+            g
+        }
+        fn cleared() -> std::sync::MutexGuard<'static, ()> {
+            let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            std::env::remove_var("BLVM_IBD_AGGRESSIVE_REPAIR");
+            g
+        }
+    }
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn apply_autorepair_no_op_when_marker_missing_preserves_watermark() {

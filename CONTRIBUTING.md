@@ -32,7 +32,7 @@ This project follows the [Rust Code of Conduct](https://www.rust-lang.org/polici
 
 ### Development Setup
 
-**crates.io / CI (no monorepo path patches):** `blvm-muhash` **0.1.6+** is required (MuHash running-state persistence). Publish [`blvm-muhash`](https://crates.io/crates/blvm-muhash) **before** or with any `blvm-node` release that uses that API, and keep the repo `Cargo.lock` committed so `cargo * --locked` matches.
+**crates.io / CI (no monorepo path patches):** Like other `blvm-*` crates, `blvm-muhash` is declared as `>=0.1, <1`. The crates.io release you depend on must include the MuHash APIs this tree uses (`serialize_running_state` / `deserialize_running_state`, `insert_mut` / `remove_mut` on the IBD flush hot path). Publish [`blvm-muhash`](https://crates.io/crates/blvm-muhash) before or with any `blvm-node` release that needs newer APIs; keep `Cargo.lock` committed so `cargo * --locked` matches CI.
 
 ```bash
 git clone https://github.com/BTCDecoded/blvm-node.git

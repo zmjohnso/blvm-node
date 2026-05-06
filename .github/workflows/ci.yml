@@ -168,7 +168,7 @@ jobs:
           # Run tests only (no coverage) for fast PR feedback
           # Coverage runs separately in coverage.yml workflow
           # Default crate features only (see Cargo.toml [features].default) — not --all-features
-          # --locked: CI strips [patch.crates-io]; pin transitive versions (e.g. blvm-muhash >=0.1.6).
+          # --locked: CI strips [patch.crates-io]; blvm-* resolve from crates.io per Cargo.lock (0.1.x).
           cargo test --locked
       
       - name: Save Cargo cache

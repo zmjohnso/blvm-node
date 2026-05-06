@@ -1148,7 +1148,10 @@ pub mod rocksdb_impl {
     /// `BLVM_DISABLE_SST_GC=1` (escape hatch for diagnostics). On a healthy DB this is a few ms
     /// (one `live_files()` call + one `read_dir()` set-difference).
     fn gc_orphaned_ssts(db: &DB, db_path: &Path) -> Result<(usize, u64)> {
-        if std::env::var("BLVM_DISABLE_SST_GC").map(|v| v == "1").unwrap_or(false) {
+        if std::env::var("BLVM_DISABLE_SST_GC")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             tracing::info!("[ROCKSDB] orphan-SST GC: disabled via BLVM_DISABLE_SST_GC=1");
             return Ok((0, 0));
         }

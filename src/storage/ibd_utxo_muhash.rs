@@ -50,7 +50,7 @@ pub(crate) fn verify_ibd_utxo_muhash_startup(storage: &Storage) -> Result<()> {
         let utxo: UTXO = bincode::deserialize(&v)
             .with_context(|| format!("decode ibd_utxos row {:?}", &k[..8]))?;
         let pre = utxo_muhash_preimage(&op, &utxo);
-        scan = scan.insert(&pre);
+        scan.insert_mut(&pre);
     }
 
     let expected = scan.finalize();
