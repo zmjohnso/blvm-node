@@ -609,7 +609,7 @@ impl PaymentStateMachine {
         manifest: &crate::module::registry::manifest::ModuleManifest,
         module_hash: &[u8; 32], // Module hash for encryption key derivation
         node_script: Vec<u8>,   // Node operator's payment script (10% of payment)
-        merchant_key: Option<&secp256k1::SecretKey>,
+        merchant_key: Option<&[u8; 32]>,
         create_covenant: bool,
     ) -> Result<(String, Option<CovenantProof>), PaymentError> {
         // Create module payment request using payment processor

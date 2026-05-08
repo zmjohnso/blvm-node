@@ -28,8 +28,6 @@ use super::peer_manager::{PeerByteRateLimiter, PeerManager, PeerRateLimiter};
 use super::transport;
 use super::NetworkMessage;
 use hex;
-use secp256k1;
-
 /// Get wire command string for ProtocolMessage (for MessageReceived event)
 fn protocol_message_type(msg: &ProtocolMessage) -> &'static str {
     match msg {
@@ -140,7 +138,7 @@ pub struct NetworkManager {
     payment_state_machine:
         Arc<tokio::sync::Mutex<Option<Arc<crate::payment::state_machine::PaymentStateMachine>>>>,
     /// Merchant private key for signing payment ACKs (optional)
-    merchant_key: Arc<tokio::sync::Mutex<Option<secp256k1::SecretKey>>>,
+    merchant_key: Arc<tokio::sync::Mutex<Option<[u8; 32]>>>,
     /// Node payment address script (for module downloads - 10% fee)
     node_payment_script: Arc<tokio::sync::Mutex<Option<Vec<u8>>>>,
     /// Module encryption for encrypted module serving
@@ -527,7 +525,7 @@ impl NetworkManager {
     }
 
     /// Set merchant private key for signing payment ACKs
-    pub async fn set_merchant_key(&self, merchant_key: Option<secp256k1::SecretKey>) {
+    pub async fn set_merchant_key(&self, merchant_key: Option<[u8; 32]>) {
         *self.merchant_key.lock().await = merchant_key;
     }
 
@@ -2425,7 +2423,7 @@ impl NetworkManager {
         &self.node_payment_script
     }
 
-    pub(crate) fn merchant_key(&self) -> &Arc<tokio::sync::Mutex<Option<secp256k1::SecretKey>>> {
+    pub(crate) fn merchant_key(&self) -> &Arc<tokio::sync::Mutex<Option<[u8; 32]>>> {
         &self.merchant_key
     }
 

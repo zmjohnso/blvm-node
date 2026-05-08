@@ -59,7 +59,7 @@ pub async fn handle_get_payment_request(
 pub async fn handle_payment(
     payment_msg: &PaymentMessage,
     processor: Option<Arc<PaymentProcessor>>,
-    merchant_private_key: Option<&secp256k1::SecretKey>,
+    merchant_private_key: Option<&[u8; 32]>,
 ) -> Result<PaymentACKMessage> {
     let processor = processor.ok_or_else(|| anyhow::anyhow!("Payment processor not available"))?;
 

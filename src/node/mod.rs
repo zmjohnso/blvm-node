@@ -20,7 +20,6 @@ pub mod sync;
 
 use anyhow::Result;
 use hex;
-use secp256k1;
 use std::net::SocketAddr;
 use tracing::{debug, error, info, warn};
 
@@ -1137,10 +1136,9 @@ impl Node {
                             // Set merchant key from config if available
                             let merchant_key =
                                 payment_config.merchant_key.as_ref().and_then(|hex_key| {
-                                    hex::decode(hex_key).ok().and_then(|bytes| {
-                                        let arr: [u8; 32] = bytes.try_into().ok()?;
-                                        secp256k1::SecretKey::from_slice(&arr).ok()
-                                    })
+                                    hex::decode(hex_key)
+                                        .ok()
+                                        .and_then(|bytes| bytes.try_into().ok())
                                 });
                             self.network.set_merchant_key(merchant_key).await;
 

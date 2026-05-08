@@ -162,7 +162,7 @@ impl PaymentProcessor {
         &self,
         outputs: Vec<PaymentOutput>,
         merchant_data: Option<Vec<u8>>,
-        merchant_key: Option<&secp256k1::SecretKey>,
+        merchant_key: Option<&[u8; 32]>,
     ) -> Result<PaymentRequest, PaymentError> {
         let timestamp = crate::utils::current_timestamp();
 
@@ -182,7 +182,7 @@ impl PaymentProcessor {
             payment_request.payment_details.merchant_data = Some(data);
         }
 
-        // Sign if merchant key provided (uses fork secp256k1 directly)
+        // Sign if merchant key provided
         if let Some(key) = merchant_key {
             payment_request.sign(key).map_err(|e| {
                 PaymentError::ProcessingError(format!("Failed to sign payment request: {e}"))
@@ -218,12 +218,12 @@ impl PaymentProcessor {
         &self,
         payment: Payment,
         payment_id: String,
-        merchant_key: Option<&secp256k1::SecretKey>,
+        merchant_key: Option<&[u8; 32]>,
     ) -> Result<PaymentACK, PaymentError> {
         // Look up original request
         let request = self.get_payment_request(&payment_id).await?;
 
-        // PaymentProtocolServer uses fork secp256k1 directly
+        // Process payment
         let ack = PaymentProtocolServer::process_payment(&payment, &request, merchant_key)
             .map_err(|e| PaymentError::ValidationFailed(format!("{e:?}")))?;
 
@@ -389,7 +389,7 @@ impl PaymentProcessor {
         manifest: &crate::module::registry::manifest::ModuleManifest,
         module_hash: &[u8; 32],
         node_script: Vec<u8>,
-        merchant_key: Option<&secp256k1::SecretKey>,
+        merchant_key: Option<&[u8; 32]>,
     ) -> Result<PaymentRequest, PaymentError> {
         use crate::module::security::signing::ModuleSigner;
         use blvm_protocol::address::BitcoinAddress;
