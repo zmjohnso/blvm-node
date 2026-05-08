@@ -91,8 +91,6 @@ hkdf = "=0.12.4"  # Key derivation for module encryption
 
 # Random number generation for Dandelion++
 rand = "=0.8.5"
-# For iroh SecretKey generation in tests (avoids RNG version conflicts)
-getrandom = "=0.2"
 # Directory utilities for Bitcoin Core detection
 dirs = "=5.0"
 # SmallVec for production optimizations
@@ -133,8 +131,8 @@ dashmap = "=6.0"
 # Memory allocator optimization
 # Disabled for Windows cross-compilation (mimalloc linking issues with MinGW)
 [target.'cfg(not(target_os = "windows"))'.dependencies]
-mimalloc = { version = "=0.1", default-features = false }
-libmimalloc-sys = { version = "=0.1", features = ["extended"] }
+mimalloc = { version = "=0.1", default-features = false, optional = true }
+libmimalloc-sys = { version = "=0.1", features = ["extended"], optional = true }
 
 # System calls for process sandboxing (Unix)
 nix = { version = "=0.28", features = ["process", "resource"], optional = true }
@@ -236,7 +234,7 @@ governance = ["dep:reqwest"]
 zmq = ["dep:zeromq"]
 # Memory allocator optimization (mimalloc) - faster than default allocator
 # Disabled for Windows cross-compilation (mimalloc linking issues with MinGW)
-mimalloc = []
+mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
 # JSON logging format for structured logging (production/monitoring)
 json-logging = []
 # Modern REST API (runs alongside JSON-RPC)
@@ -287,6 +285,8 @@ blvm-protocol = { version = ">=0.1, <1", features = ["test-utils"] }
 blvm-consensus = { version = ">=0.1, <1", features = ["test-utils"] }
 tempfile = "=3.8.1"
 rand = "0.8"
+# For iroh SecretKey generation in iroh-gated tests (avoids RNG version conflicts)
+getrandom = "=0.2"
 # Module DB / WASM integration tests that used blvm_sdk live under tests/module/ — run them from a
 # monorepo checkout with a path dev-dependency, or from blvm-sdk; not required for CI/crates.io.
 criterion = "=0.5"
