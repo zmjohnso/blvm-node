@@ -268,6 +268,12 @@ async fn handle_peer_connected(nm: &NetworkManager, addr: TransportAddr) {
     };
 
     if let Some(peer_socket) = socket_addr {
+        // Track per-IP connection count for Sybil monitoring.
+        {
+            let mut per_ip = nm.connections_per_ip().lock().await;
+            *per_ip.entry(peer_socket.ip()).or_insert(0) += 1;
+        }
+
         let start_height = nm
             .storage()
             .as_ref()
@@ -379,6 +385,18 @@ async fn handle_peer_disconnected(nm: &NetworkManager, addr: TransportAddr) {
 
         // Decrement eclipse-prevention diversity counter for this peer's IP.
         nm.remove_peer_diversity(sock.ip());
+
+        // Decrement per-IP connection count.
+        {
+            let mut per_ip = nm.connections_per_ip().lock().await;
+            if let Some(count) = per_ip.get_mut(&sock.ip()) {
+                if *count <= 1 {
+                    per_ip.remove(&sock.ip());
+                } else {
+                    *count -= 1;
+                }
+            }
+        }
     }
 
     // Enqueue TCP persistent peers for automatic reconnect (see `start_peer_reconnection_task`).

@@ -141,8 +141,17 @@ impl NetworkManager {
 
         if !version_received {
             match parsed {
-                ProtocolMessage::Version(_) | ProtocolMessage::Verack => {
-                    // Allow — these are the handshake messages.
+                ProtocolMessage::Version(_) => {
+                    // Allow — Version is the first required handshake message.
+                }
+                ProtocolMessage::Verack => {
+                    // A Verack before we've received the peer's Version is a
+                    // protocol violation; drop it silently.
+                    warn!(
+                        "Peer {} sent Verack before Version — ignoring",
+                        peer_addr
+                    );
+                    return Ok(());
                 }
                 _ => {
                     warn!(
@@ -576,6 +585,48 @@ impl NetworkManager {
                 let _ = self
                     .peer_tx()
                     .send(NetworkMessage::FilteredBlockReceived(data, peer_addr));
+                return Ok(());
+            }
+            ProtocolMessage::GetBlocks(_) => {
+                // We serve headers via GetHeaders; respond with an empty Inv so
+                // old-style peers learn we have nothing from their locator.
+                let empty_inv = ProtocolMessage::Inv(crate::network::protocol::InvMessage {
+                    inventory: vec![],
+                });
+                if let Ok(wire) = ProtocolParser::serialize_message(&empty_inv) {
+                    let _ = self.send_to_peer(peer_addr, wire).await;
+                }
+                return Ok(());
+            }
+            ProtocolMessage::MemPool => {
+                // BIP35: respond with an Inv listing all txids currently in our mempool.
+                if let Some(mm) = self.mempool_manager() {
+                    use crate::network::inventory::MSG_TX;
+                    use blvm_protocol::block::calculate_tx_id;
+                    let txns: Vec<blvm_protocol::Transaction> = mm.get_transactions();
+                    let inventory: Vec<crate::network::protocol::InventoryVector> = txns
+                        .iter()
+                        .map(|tx| crate::network::protocol::InventoryVector {
+                            inv_type: MSG_TX,
+                            hash: calculate_tx_id(tx),
+                        })
+                        .collect();
+                    let inv_msg = ProtocolMessage::Inv(crate::network::protocol::InvMessage {
+                        inventory,
+                    });
+                    if let Ok(wire) = ProtocolParser::serialize_message(&inv_msg) {
+                        let _ = self.send_to_peer(peer_addr, wire).await;
+                    }
+                }
+                return Ok(());
+            }
+            ProtocolMessage::Verack => {
+                // Mark handshake complete on the peer state.
+                let mut peer_states = self.peer_states().write().await;
+                if let Some(state) = peer_states.get_mut(&peer_addr) {
+                    state.handshake_complete = true;
+                }
+                drop(peer_states);
                 return Ok(());
             }
             _ => {}
