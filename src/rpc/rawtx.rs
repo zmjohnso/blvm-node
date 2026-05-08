@@ -321,13 +321,33 @@ impl RawTxRpc {
                         }
                     }
 
-                    // Add to mempool
-                    // Note: add_transaction requires &mut self, but we have Arc<MempoolManager>
-                    // In production, this would need to use interior mutability (Mutex/RwLock)
-                    // For now, we'll skip adding to mempool as it requires mutable access
-                    debug!(
-                        "Transaction validated but not added to mempool (requires mutable access)"
-                    );
+                    // Add to mempool — add_transaction uses &self (interior mutability).
+                    match mempool.add_transaction(tx.clone()) {
+                        Ok(true) => {
+                            debug!("Transaction {} accepted to mempool", txid_hex);
+                        }
+                        Ok(false) => {
+                            return Err(RpcError::tx_rejected_with_context(
+                                format!("Transaction rejected by mempool policy"),
+                                Some(&txid_hex),
+                                Some("rejected"),
+                                Some(json!({
+                                    "txid": txid_hex,
+                                    "reason": "policy",
+                                    "suggestions": [
+                                        "Transaction may already be in the mempool",
+                                        "Transaction fee rate may be below min-relay-fee",
+                                        "Transaction conflicts with existing mempool transaction"
+                                    ]
+                                })),
+                            ));
+                        }
+                        Err(e) => {
+                            return Err(RpcError::internal_error(format!(
+                                "Failed to add transaction to mempool: {e}"
+                            )));
+                        }
+                    }
                 }
                 Ok(blvm_protocol::ValidationResult::Invalid(reason)) => {
                     return Err(RpcError::tx_rejected_with_context(

@@ -128,6 +128,33 @@ impl NetworkManager {
         parsed: &ProtocolMessage,
         data: Vec<u8>,
     ) -> Result<()> {
+        // Pre-handshake guard: reject everything except Version before the peer
+        // has identified itself.  Serving data (headers, inv, addr, …) to an
+        // unversioned peer leaks information and bypasses per-peer limits.
+        let version_received = {
+            let peer_states = self.peer_states().read().await;
+            peer_states
+                .get(&peer_addr)
+                .map(|s| s.version > 0)
+                .unwrap_or(false)
+        };
+
+        if !version_received {
+            match parsed {
+                ProtocolMessage::Version(_) | ProtocolMessage::Verack => {
+                    // Allow — these are the handshake messages.
+                }
+                _ => {
+                    warn!(
+                        "Peer {} sent {:?} before Version — ignoring",
+                        peer_addr,
+                        std::mem::discriminant(parsed)
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
         match parsed {
             ProtocolMessage::Version(version_msg) => {
                 self.handle_version_received(peer_addr, version_msg).await?;

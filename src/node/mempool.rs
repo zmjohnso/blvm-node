@@ -1582,28 +1582,45 @@ impl MempoolManager {
         input_total.saturating_sub(output_total)
     }
 
-    /// Estimate transaction size in vbytes
+    /// Estimate transaction size in vbytes.
     ///
-    /// Simplified estimation - in production, would use actual serialized size
+    /// For transactions with SegWit inputs (detected by empty `script_sig`), applies
+    /// an approximate witness weight discount.  The `Transaction` type in this
+    /// codebase does not carry witness data inline, so we use the following
+    /// heuristic per segwit input:
+    ///   * P2WPKH witness: ~107 bytes at 1/4 weight → 107/4 ≈ 27 vbytes
+    ///   * The 2-byte segwit marker/flag overhead is ~0.5 vbytes (negligible)
+    /// Inputs with non-empty `script_sig` are assumed non-witness (or P2SH-wrapped).
     pub fn estimate_transaction_size(&self, tx: &Transaction) -> usize {
-        // Base transaction size: version (4) + locktime (4) = 8 bytes
-        let mut size = 8;
+        // Base: version (4) + input count (var, ~1) + output count (var, ~1) + locktime (4)
+        let mut base_size: usize = 10;
+        let mut witness_size: usize = 0; // witness bytes (counted at 1/4 weight)
+        let mut segwit_inputs = 0usize;
 
-        // Input size: prevout (36) + script_sig (var) + sequence (4)
         for input in &tx.inputs {
-            size += 36; // prevout
-            size += input.script_sig.len();
-            size += 4; // sequence
+            // prevout (36) + sequence (4) + script_sig length varint (~1) + script_sig
+            base_size += 41 + input.script_sig.len();
+            if input.script_sig.is_empty() {
+                // Likely a native SegWit input; estimate P2WPKH witness (~107 bytes)
+                // or P2WSH (~220 bytes). Use P2WPKH as the conservative estimate.
+                witness_size += 107;
+                segwit_inputs += 1;
+            }
         }
 
-        // Output size: value (8) + script_pubkey (var)
         for output in &tx.outputs {
-            size += 8; // value
-            size += output.script_pubkey.len();
+            // value (8) + script_pubkey length varint (~1) + script_pubkey
+            base_size += 9 + output.script_pubkey.len();
         }
 
-        // Add witness discount if segwit (simplified - assume no witness for now)
-        size
+        if segwit_inputs > 0 {
+            // SegWit marker (1) + flag (1) also counted at discount weight
+            witness_size += 2;
+            // vsize = ceil((base_size * 4 + witness_size) / 4)
+            (base_size * 4 + witness_size + 3) / 4
+        } else {
+            base_size
+        }
     }
 
     /// Remove transaction from mempool

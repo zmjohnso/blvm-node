@@ -48,6 +48,7 @@ impl NetworkManager {
     /// Start periodic task to clean up DoS protection data
     pub(crate) fn start_dos_protection_cleanup_task(&self) {
         let dos_protection = Arc::clone(self.dos_protection());
+        let bandwidth_protection = Arc::clone(self.bandwidth_protection());
         let ban_list = Arc::clone(self.ban_list());
         let bg = self.background_task_config();
         let outer_secs = bg.dos_cleanup_interval_secs;
@@ -59,6 +60,9 @@ impl NetworkManager {
                 interval.tick().await;
 
                 dos_protection.cleanup().await;
+
+                // Evict stale bandwidth tracker entries (idle > 25h).
+                bandwidth_protection.evict_stale_entries(90_000).await;
 
                 let dos_clone = Arc::clone(&dos_protection);
                 let ban_list_clone = Arc::clone(&ban_list);

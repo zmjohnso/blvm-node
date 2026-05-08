@@ -86,8 +86,10 @@ struct ServiceBandwidthTracker {
     daily_bytes: u64,
     /// Hourly bandwidth window
     hourly_bytes: u64,
-    /// Window start timestamp
-    window_start: u64,
+    /// Start of the daily window (Unix timestamp)
+    daily_window_start: u64,
+    /// Start of the current hourly window (Unix timestamp)
+    hourly_window_start: u64,
     /// Request count in current hour
     request_count: u32,
     /// Last request timestamp
@@ -96,32 +98,32 @@ struct ServiceBandwidthTracker {
 
 impl ServiceBandwidthTracker {
     fn new() -> Self {
+        let now = current_timestamp();
         Self {
             daily_bytes: 0,
             hourly_bytes: 0,
-            window_start: current_timestamp(),
+            daily_window_start: now,
+            hourly_window_start: now,
             request_count: 0,
             last_request: None,
         }
     }
 
-    /// Check and reset windows if needed
+    /// Check and reset windows as needed (true sliding windows)
     fn check_and_reset(&mut self) {
         let now = current_timestamp();
-        let elapsed = now.saturating_sub(self.window_start);
-
-        // Reset hourly window every hour
-        if elapsed >= 3600 {
-            self.hourly_bytes = 0;
-            self.request_count = 0;
-        }
 
         // Reset daily window every 24 hours
-        if elapsed >= 86400 {
+        if now.saturating_sub(self.daily_window_start) >= 86400 {
             self.daily_bytes = 0;
+            self.daily_window_start = now;
+        }
+
+        // Reset hourly window every hour (independent of daily window)
+        if now.saturating_sub(self.hourly_window_start) >= 3600 {
             self.hourly_bytes = 0;
             self.request_count = 0;
-            self.window_start = now;
+            self.hourly_window_start = now;
         }
     }
 
@@ -526,6 +528,31 @@ impl BandwidthProtectionManager {
         }
 
         true
+    }
+
+    /// Remove tracker entries that have been inactive for longer than `max_idle_secs`.
+    /// Call periodically (e.g. once per hour from a background task) to prevent OOM
+    /// on long-running nodes with many transient peers.
+    pub async fn evict_stale_entries(&self, max_idle_secs: u64) {
+        let now = current_timestamp();
+        let cutoff = now.saturating_sub(max_idle_secs);
+
+        {
+            let mut m = self.peer_service_bandwidth.lock().await;
+            m.retain(|_, t| t.last_request.map_or(false, |ts| ts >= cutoff));
+        }
+        {
+            let mut m = self.ip_service_bandwidth.lock().await;
+            m.retain(|_, t| t.last_request.map_or(false, |ts| ts >= cutoff));
+        }
+        {
+            let mut m = self.ipv4_subnet_service_bandwidth.lock().await;
+            m.retain(|_, t| t.last_request.map_or(false, |ts| ts >= cutoff));
+        }
+        {
+            let mut m = self.ipv6_subnet_service_bandwidth.lock().await;
+            m.retain(|_, t| t.last_request.map_or(false, |ts| ts >= cutoff));
+        }
     }
 
     /// Get IBD protection manager (for backward compatibility)
