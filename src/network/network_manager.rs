@@ -2630,6 +2630,7 @@ impl NetworkManager {
     /// - Dandelion: NODE_DANDELION (if feature enabled)
     /// - Package Relay: NODE_PACKAGE_RELAY (always enabled)
     /// - FIBRE: NODE_FIBRE (always enabled)
+    ///
     /// Returns the shared UTXO set Arc so other components (e.g. MempoolManager) can be wired in.
     pub fn utxo_set_arc(&self) -> Arc<Mutex<UtxoSet>> {
         Arc::clone(&self.utxo_set)

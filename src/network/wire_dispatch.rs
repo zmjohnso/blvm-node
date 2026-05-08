@@ -33,11 +33,7 @@ impl NetworkManager {
                 peer_addr, version_msg.version, MIN_PEER_VERSION
             );
             return self
-                .disconnect_for_protocol_violation(
-                    peer_addr,
-                    "version below minimum",
-                    false,
-                )
+                .disconnect_for_protocol_violation(peer_addr, "version below minimum", false)
                 .await;
         }
 
@@ -47,7 +43,7 @@ impl NetworkManager {
             .local_version_nonces
             .lock()
             .unwrap()
-            .contains(&(version_msg.nonce as u64))
+            .contains(&version_msg.nonce)
         {
             warn!(
                 "Peer {} echoed our own version nonce — self-connection, disconnecting",
@@ -63,10 +59,7 @@ impl NetworkManager {
             let peer_states = self.peer_states().read().await;
             if let Some(state) = peer_states.get(&peer_addr) {
                 if state.version > 0 {
-                    warn!(
-                        "Peer {} sent Version twice — disconnecting",
-                        peer_addr
-                    );
+                    warn!("Peer {} sent Version twice — disconnecting", peer_addr);
                     drop(peer_states);
                     return self
                         .disconnect_for_protocol_violation(
@@ -147,10 +140,7 @@ impl NetworkManager {
                 ProtocolMessage::Verack => {
                     // A Verack before we've received the peer's Version is a
                     // protocol violation; drop it silently.
-                    warn!(
-                        "Peer {} sent Verack before Version — ignoring",
-                        peer_addr
-                    );
+                    warn!("Peer {} sent Verack before Version — ignoring", peer_addr);
                     return Ok(());
                 }
                 _ => {
@@ -611,9 +601,8 @@ impl NetworkManager {
                             hash: calculate_tx_id(tx),
                         })
                         .collect();
-                    let inv_msg = ProtocolMessage::Inv(crate::network::protocol::InvMessage {
-                        inventory,
-                    });
+                    let inv_msg =
+                        ProtocolMessage::Inv(crate::network::protocol::InvMessage { inventory });
                     if let Ok(wire) = ProtocolParser::serialize_message(&inv_msg) {
                         let _ = self.send_to_peer(peer_addr, wire).await;
                     }

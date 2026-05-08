@@ -539,19 +539,19 @@ impl BandwidthProtectionManager {
 
         {
             let mut m = self.peer_service_bandwidth.lock().await;
-            m.retain(|_, t| t.last_request.map_or(false, |ts| ts >= cutoff));
+            m.retain(|_, t| t.last_request.is_some_and(|ts| ts >= cutoff));
         }
         {
             let mut m = self.ip_service_bandwidth.lock().await;
-            m.retain(|_, t| t.last_request.map_or(false, |ts| ts >= cutoff));
+            m.retain(|_, t| t.last_request.is_some_and(|ts| ts >= cutoff));
         }
         {
             let mut m = self.ipv4_subnet_service_bandwidth.lock().await;
-            m.retain(|_, t| t.last_request.map_or(false, |ts| ts >= cutoff));
+            m.retain(|_, t| t.last_request.is_some_and(|ts| ts >= cutoff));
         }
         {
             let mut m = self.ipv6_subnet_service_bandwidth.lock().await;
-            m.retain(|_, t| t.last_request.map_or(false, |ts| ts >= cutoff));
+            m.retain(|_, t| t.last_request.is_some_and(|ts| ts >= cutoff));
         }
     }
 

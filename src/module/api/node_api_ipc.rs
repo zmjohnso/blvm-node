@@ -3,11 +3,11 @@
 //! This module provides a NodeAPI trait implementation that translates
 //! method calls into IPC requests to the node. This can be reused by all modules.
 
-use crate::module::ipc::ModuleIpcClient;
 use crate::module::ipc::protocol::ModuleMessage;
 use crate::module::ipc::protocol::{
     EventPayload, MessageType, RequestMessage, RequestPayload, ResponsePayload,
 };
+use crate::module::ipc::ModuleIpcClient;
 use crate::module::traits::{
     BlockServeDenylistSnapshot, ChainInfo, EventType, LightningInfo, MempoolSize, ModuleError,
     NetworkStats, NodeAPI, PaymentState, PeerInfo, SyncStatus, TxServeDenylistSnapshot,

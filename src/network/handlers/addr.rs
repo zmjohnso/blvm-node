@@ -27,7 +27,10 @@ impl NetworkManager {
         }; // guard dropped here
 
         if already_responded {
-            debug!("GetAddr from {}: already answered once this connection, returning empty", peer_addr);
+            debug!(
+                "GetAddr from {}: already answered once this connection, returning empty",
+                peer_addr
+            );
             let empty = crate::network::protocol::ProtocolMessage::Addr(
                 crate::network::protocol::AddrMessage { addresses: vec![] },
             );

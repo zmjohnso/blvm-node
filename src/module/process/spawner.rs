@@ -10,9 +10,9 @@ use tracing::{debug, info, warn};
 
 use crate::utils::retry::{retry_async_with_backoff, RetryConfig};
 
-use crate::module::ipc::ModuleIpcClient;
 #[cfg(unix)]
 use crate::module::ipc::protocol::{MessageType, RequestMessage, RequestPayload};
+use crate::module::ipc::ModuleIpcClient;
 use crate::module::sandbox::{FileSystemSandbox, NetworkSandbox, ProcessSandbox, SandboxConfig};
 use crate::module::traits::{ModuleContext, ModuleError};
 
@@ -182,31 +182,31 @@ impl ModuleProcessSpawner {
         // Send handshake so node registers this connection (for heartbeat)
         #[cfg(unix)]
         {
-        let version = context
-            .config
-            .get("version")
-            .cloned()
-            .unwrap_or_else(|| "0.1.0".to_string());
-        let handshake = RequestMessage {
-            correlation_id: 1,
-            request_type: MessageType::Handshake,
-            payload: RequestPayload::Handshake {
-                module_id: context.module_id.clone(),
-                module_name: module_name.to_string(),
-                version,
-            },
-        };
-        let response = ipc_client
-            .request(handshake)
-            .await
-            .map_err(|e| ModuleError::IpcError(format!("Failed to send handshake: {e}")))?;
-        if !response.success {
-            return Err(ModuleError::IpcError(
-                response
-                    .error
-                    .unwrap_or_else(|| "Handshake failed".to_string()),
-            ));
-        }
+            let version = context
+                .config
+                .get("version")
+                .cloned()
+                .unwrap_or_else(|| "0.1.0".to_string());
+            let handshake = RequestMessage {
+                correlation_id: 1,
+                request_type: MessageType::Handshake,
+                payload: RequestPayload::Handshake {
+                    module_id: context.module_id.clone(),
+                    module_name: module_name.to_string(),
+                    version,
+                },
+            };
+            let response = ipc_client
+                .request(handshake)
+                .await
+                .map_err(|e| ModuleError::IpcError(format!("Failed to send handshake: {e}")))?;
+            if !response.success {
+                return Err(ModuleError::IpcError(
+                    response
+                        .error
+                        .unwrap_or_else(|| "Handshake failed".to_string()),
+                ));
+            }
         } // end #[cfg(unix)] handshake block
 
         let client = Some(ipc_client);

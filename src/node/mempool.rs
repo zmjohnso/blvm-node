@@ -1195,7 +1195,7 @@ impl MempoolManager {
                 .spam_filter
                 .as_ref()
                 .map(|cfg| SpamFilter::with_config(cfg.clone().into()))
-                .unwrap_or_else(SpamFilter::new);
+                .unwrap_or_default();
             if filter.is_spam(&tx).is_spam {
                 warn!(
                     "Transaction {} rejected: classified as spam",
@@ -1616,6 +1616,7 @@ impl MempoolManager {
     /// heuristic per segwit input:
     ///   * P2WPKH witness: ~107 bytes at 1/4 weight → 107/4 ≈ 27 vbytes
     ///   * The 2-byte segwit marker/flag overhead is ~0.5 vbytes (negligible)
+    ///
     /// Inputs with non-empty `script_sig` are assumed non-witness (or P2SH-wrapped).
     pub fn estimate_transaction_size(&self, tx: &Transaction) -> usize {
         // Base: version (4) + input count (var, ~1) + output count (var, ~1) + locktime (4)
@@ -1643,7 +1644,7 @@ impl MempoolManager {
             // SegWit marker (1) + flag (1) also counted at discount weight
             witness_size += 2;
             // vsize = ceil((base_size * 4 + witness_size) / 4)
-            (base_size * 4 + witness_size + 3) / 4
+            (base_size * 4 + witness_size).div_ceil(4)
         } else {
             base_size
         }

@@ -328,7 +328,7 @@ impl RawTxRpc {
                         }
                         Ok(false) => {
                             return Err(RpcError::tx_rejected_with_context(
-                                format!("Transaction rejected by mempool policy"),
+                                "Transaction rejected by mempool policy".to_string(),
                                 Some(&txid_hex),
                                 Some("rejected"),
                                 Some(json!({

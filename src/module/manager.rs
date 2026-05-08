@@ -280,23 +280,23 @@ impl ModuleManager {
         // Start IPC server in background task (Unix only: domain sockets)
         #[cfg(unix)]
         {
-        let mut ipc_server = ModuleIpcServer::new(&socket_path)
-            .with_event_manager(Arc::clone(&self.event_manager))
-            .with_api_hub(Arc::clone(&api_hub));
-        #[cfg(all(unix, feature = "wasm-modules"))]
-        if self.wasm_loader.is_some() {
-            let invoker = Arc::new(ManagerWasmInvoker {
-                modules: Arc::clone(&self.modules),
-            });
-            ipc_server = ipc_server.with_wasm_invoker(invoker);
-        }
-        let ipc_server = Arc::new(tokio::sync::Mutex::new(ipc_server));
-        self.ipc_server = Some(Arc::clone(&ipc_server));
-        self.node_socket_path = Some(socket_path.as_ref().to_path_buf());
-        let node_api_clone = Arc::clone(&node_api);
-        let server_handle =
-            tokio::spawn(async move { ipc_server.lock().await.start(node_api_clone).await });
-        self.ipc_server_handle = Some(server_handle);
+            let mut ipc_server = ModuleIpcServer::new(&socket_path)
+                .with_event_manager(Arc::clone(&self.event_manager))
+                .with_api_hub(Arc::clone(&api_hub));
+            #[cfg(all(unix, feature = "wasm-modules"))]
+            if self.wasm_loader.is_some() {
+                let invoker = Arc::new(ManagerWasmInvoker {
+                    modules: Arc::clone(&self.modules),
+                });
+                ipc_server = ipc_server.with_wasm_invoker(invoker);
+            }
+            let ipc_server = Arc::new(tokio::sync::Mutex::new(ipc_server));
+            self.ipc_server = Some(Arc::clone(&ipc_server));
+            self.node_socket_path = Some(socket_path.as_ref().to_path_buf());
+            let node_api_clone = Arc::clone(&node_api);
+            let server_handle =
+                tokio::spawn(async move { ipc_server.lock().await.start(node_api_clone).await });
+            self.ipc_server_handle = Some(server_handle);
         } // end #[cfg(unix)]
 
         // Start crash handler
