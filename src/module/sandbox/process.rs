@@ -102,8 +102,6 @@ impl ProcessSandbox {
         use std::ptr::null_mut;
 
         #[allow(unused_imports)]
-        use windows_sys::core::PCWSTR;
-        #[allow(unused_imports)]
         use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
         #[allow(unused_imports)]
         use windows_sys::Win32::System::JobObjects::{
@@ -122,9 +120,9 @@ impl ProcessSandbox {
             .chain(std::iter::once(0))
             .collect();
 
-        let job_handle = unsafe { CreateJobObjectW(null_mut(), PCWSTR(job_name.as_ptr())) };
+        let job_handle = unsafe { CreateJobObjectW(null_mut(), job_name.as_ptr()) };
 
-        if job_handle == 0 || job_handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        if job_handle.is_null() || job_handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
             warn!(
                 "Failed to create Windows job object for PID {}: {}",
                 pid,
@@ -155,7 +153,7 @@ impl ProcessSandbox {
                 job_handle,
                 JobObjectExtendedLimitInformation,
                 &limit_info as *const _ as *const _,
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             )
         };
 
@@ -179,7 +177,7 @@ impl ProcessSandbox {
             )
         };
 
-        if process_handle == 0
+        if process_handle.is_null()
             || process_handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE
         {
             warn!(

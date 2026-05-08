@@ -3,7 +3,7 @@
 //! This module provides a NodeAPI trait implementation that translates
 //! method calls into IPC requests to the node. This can be reused by all modules.
 
-use crate::module::ipc::client::ModuleIpcClient;
+use crate::module::ipc::ModuleIpcClient;
 use crate::module::ipc::protocol::ModuleMessage;
 use crate::module::ipc::protocol::{
     EventPayload, MessageType, RequestMessage, RequestPayload, ResponsePayload,

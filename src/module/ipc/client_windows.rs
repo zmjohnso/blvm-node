@@ -4,7 +4,7 @@ use futures::{SinkExt, StreamExt};
 use std::path::Path;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::windows::named_pipe::ClientOptions;
-use tokio_util::codec::{FramedRead, FramedWrite};
+use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::debug;
 
 use crate::module::ipc::module_ipc_length_codec;

@@ -383,6 +383,7 @@ impl ControlRpc {
     ///
     /// Returns { "sync-policy": {...}, "hello": {...} } for blvm to build dynamic CLI.
     /// Params: [] (no parameters)
+    #[cfg(unix)]
     pub async fn getmoduleclispecs(&self, _params: &Value) -> RpcResult<Value> {
         let mgr = self
             .module_manager

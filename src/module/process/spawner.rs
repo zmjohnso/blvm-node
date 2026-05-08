@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 
 use crate::utils::retry::{retry_async_with_backoff, RetryConfig};
 
-use crate::module::ipc::client::ModuleIpcClient;
+use crate::module::ipc::ModuleIpcClient;
 #[cfg(unix)]
 use crate::module::ipc::protocol::{MessageType, RequestMessage, RequestPayload};
 use crate::module::sandbox::{FileSystemSandbox, NetworkSandbox, ProcessSandbox, SandboxConfig};
