@@ -10,6 +10,7 @@ use crate::storage::blockstore::BlockStore;
 use anyhow::{Context, Result};
 use blvm_protocol::features::FeatureRegistry;
 use blvm_protocol::{segwit::Witness, Block, Hash, ProtocolVersion};
+use super::types::{SharedBlock, SharedWitnesses};
 use futures::stream::{FuturesUnordered, StreamExt};
 use hex;
 use std::collections::BTreeMap;
@@ -57,8 +58,9 @@ fn try_load_local_ibd_block(
 
 /// Result of [`download_chunk`]: when streaming to the coordinator, `blocks` is empty and
 /// `streamed_block_count` holds the number sent; otherwise `blocks` contains the full chunk.
+/// Blocks and witnesses are Arc-wrapped so they can be passed cheaply through further pipeline stages.
 pub(crate) struct DownloadChunkResult {
-    pub blocks: Vec<(u64, Block, Vec<Vec<Witness>>)>,
+    pub blocks: Vec<(u64, SharedBlock, SharedWitnesses)>,
     pub streamed_block_count: usize,
 }
 
@@ -165,7 +167,7 @@ pub(crate) async fn download_chunk(
     blockstore: &BlockStore,
     config: &ParallelIBDConfig,
     peer_scorer: Arc<crate::network::peer_scoring::PeerScorer>,
-    block_tx: Option<tokio::sync::mpsc::Sender<(u64, Block, Vec<Vec<Witness>>)>>,
+    block_tx: Option<tokio::sync::mpsc::Sender<(u64, SharedBlock, SharedWitnesses)>>,
     blocks_sem: Option<Arc<Semaphore>>,
     mut stall_rx: Option<&mut broadcast::Receiver<u64>>,
     protocol_version: ProtocolVersion,
@@ -261,7 +263,8 @@ pub(crate) async fn download_chunk(
     > = FuturesUnordered::new();
     let mut hash_iter = block_hashes.into_iter();
     let mut all_sent = false;
-    let mut received: BTreeMap<u64, (Block, Vec<Vec<Witness>>)> = BTreeMap::new();
+    // Arc-wrap immediately so downstream pipeline stages never deep-copy block bytes.
+    let mut received: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
     let mut next_to_send = start_height;
 
     let mut first_block_logged = false;
@@ -445,7 +448,7 @@ pub(crate) async fn download_chunk(
                 let latency_ms = request_start.elapsed().as_secs_f64() * 1000.0;
                 let block_size = block.header.version.to_le_bytes().len() as u64 + 80;
                 peer_scorer.record_block(peer_addr, block_size, latency_ms);
-                received.insert(height, (block, block_witnesses));
+                received.insert(height, (Arc::new(block), Arc::new(block_witnesses)));
                 if !first_block_logged {
                     info!(
                         "[IBD] {} chunk {}-{}: first block received (h={}, {}ms)",

@@ -403,6 +403,11 @@ fn push_utxo_flush_from_retire(
         }
         drop(q);
         let prepared = pkg.prepare_for_disk()?;
+        // Drop the raw ops Vec immediately after serialization. After prepare_for_disk()
+        // the slab holds all UTXO bytes; the ops Arc<Vec<(key, Arc<UTXO>)>> (~18 MB at
+        // 320k ops) and its Arc<UTXO> references are no longer needed here — in_flight_insertions
+        // already holds separate refs for the supplement path until note_utxo_flush_completed.
+        drop(pkg);
         let muhash_running = {
             let mut mh_guard = ibd_muhash.lock();
             store.flush_prepared_package(&prepared, Some(&mut *mh_guard))?;
@@ -430,6 +435,11 @@ fn push_utxo_flush_from_retire(
         let mh_acc = Arc::clone(ibd_muhash);
         q.push_back(std::thread::spawn(move || {
             let prepared = pkg.prepare_for_disk()?;
+            // Drop the raw ops Vec immediately after serialization. The flush thread may
+            // block for milliseconds waiting on mh_acc (mutex contended by other flush
+            // threads); holding the ~18 MB ops Vec during that wait wastes RSS that the
+            // UTXO cache could otherwise use.
+            drop(pkg);
             {
                 let mut mh_guard = mh_acc.lock();
                 store_clone.flush_prepared_package(&prepared, Some(&mut *mh_guard))?;
@@ -1080,6 +1090,13 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // not deep clones of the delta vectors. Retire takes the Arc out (refcount drops to 1 after
     // the dispatcher's transient fold clones go out of scope) and operates on the inner value.
     let staged: Arc<Mutex<BTreeMap<u64, Arc<UtxoDelta>>>> = Arc::new(Mutex::new(BTreeMap::new()));
+    // Lock-free counter that mirrors staged.len(). The dispatcher increments it on each
+    // staged.insert; retire threads decrement it after staged.remove. Reading this without
+    // holding the staged mutex lets the dispatch loop add a cheap backpressure cap that
+    // prevents staged from growing unboundedly when retire stalls during a UTXO durability
+    // flush (flush_disk can take 1–3 s at h>300k; validation at 500 BPS would otherwise
+    // accumulate 500–1500 Arc<UtxoDelta> entries × ~800 KB each ≈ 400–1200 MB).
+    let staged_count: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let retire_err: Arc<Mutex<Option<anyhow::Error>>> = Arc::new(Mutex::new(None));
     // Sharded retire (default `BLVM_IBD_RETIRE_SHARDS=1` → original single-threaded behavior).
     // N=1 path is bit-identical: the dispatcher just wraps a single mpsc channel and a single
@@ -1195,6 +1212,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     #[cfg(all(feature = "utxo-commitments", feature = "production"))]
     let mut _retire_dispatcher = {
         let staged_outer = Arc::clone(&staged);
+        let staged_count_outer = Arc::clone(&staged_count);
         let store_outer = Arc::clone(&ibd_store_v2_for_validation);
         let mem_mtx_outer = Arc::clone(&mem_mtx);
         let utxo_flush_handles_outer = Arc::clone(&utxo_flush_handles);
@@ -1213,6 +1231,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             start_height.saturating_sub(1),
             |i, work_rx, local_last_retired, publisher| {
                 let staged = Arc::clone(&staged_outer);
+                let staged_count = Arc::clone(&staged_count_outer);
                 let store = Arc::clone(&store_outer);
                 let mem_mtx = Arc::clone(&mem_mtx_outer);
                 let utxo_flush_handles = Arc::clone(&utxo_flush_handles_outer);
@@ -1232,6 +1251,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         run_ibd_retire_loop_with_commitment(
                             work_rx,
                             staged,
+                            staged_count,
                             local_last_retired,
                             publisher,
                             store,
@@ -1261,6 +1281,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     #[cfg(not(all(feature = "utxo-commitments", feature = "production")))]
     let mut _retire_dispatcher = {
         let staged_outer = Arc::clone(&staged);
+        let staged_count_outer = Arc::clone(&staged_count);
         let store_outer = Arc::clone(&ibd_store_v2_for_validation);
         let mem_mtx_outer = Arc::clone(&mem_mtx);
         let utxo_flush_handles_outer = Arc::clone(&utxo_flush_handles);
@@ -1276,6 +1297,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             start_height.saturating_sub(1),
             |i, work_rx, local_last_retired, publisher| {
                 let staged = Arc::clone(&staged_outer);
+                let staged_count = Arc::clone(&staged_count_outer);
                 let store = Arc::clone(&store_outer);
                 let mem_mtx = Arc::clone(&mem_mtx_outer);
                 let utxo_flush_handles = Arc::clone(&utxo_flush_handles_outer);
@@ -1292,6 +1314,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         run_ibd_retire_loop_no_commitment(
                             work_rx,
                             staged,
+                            staged_count,
                             local_last_retired,
                             publisher,
                             store,
@@ -1418,7 +1441,20 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             n_pipeline_depth
         };
 
-        while in_flight.len() < pipeline_depth_live {
+        // Backpressure: when retire is stalling (e.g. during a durability flush_disk call,
+        // which takes 1–3 s at h>300k), staged accumulates one Arc<UtxoDelta> per completed
+        // block. Each entry holds ~700 KB of UTXO data at late heights; with validation at
+        // 500 BPS a 3-second stall would fill ~1500 entries = ~1 GB. Cap the backlog so the
+        // orchestrator pauses dispatch (letting workers drain current jobs) rather than
+        // flooding staged. The cap does NOT apply when in_flight is empty — that would
+        // deadlock if retire stalled before any work was dispatched.
+        let staged_dispatch_cap = (n_pipeline_depth * 3).max(64);
+        // Snapshot once per orchestrator iteration (Relaxed load, ~1 atomic read per loop).
+        let staged_now = staged_count.load(Ordering::Relaxed);
+
+        while in_flight.len() < pipeline_depth_live
+            && (in_flight.is_empty() || staged_now < staged_dispatch_cap)
+        {
             let is_first = in_flight.is_empty();
 
             // Get next block: blocking if no in-flight work, non-blocking otherwise.
@@ -1520,6 +1556,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 }
             }
 
+            // `witnesses_d` is `SharedWitnesses = Arc<Vec<Vec<Witness>>>` from the feeder;
+            // no Arc::new() needed — reuse the same Arc that was allocated at download time.
             let witnesses_storage_d: Arc<Vec<Vec<Witness>>> = if witnesses_d.is_empty() {
                 shared_empty_witness_stacks(block_arc_d.transactions.len())
             } else if witnesses_d.len() != block_arc_d.transactions.len() {
@@ -1533,7 +1571,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     Err(e) => Err(e),
                 };
             } else {
-                Arc::new(witnesses_d)
+                witnesses_d
             };
 
             // Dispatch: snapshot only, view-build runs on the worker.
@@ -1617,11 +1655,23 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             // clone — if validation fails we re-derive keys from the block on the error path.
             let keys_for_job: Vec<OutPointKey> = std::mem::take(&mut keys_v2_buf);
 
+            // Past the BIP30 exceptional range (91710..=91855) no duplicate coinbase
+            // txids can occur in a valid Bitcoin chain. Sending an empty index to each
+            // worker is correct: the check always passes, and we avoid cloning a
+            // potentially large FxHashMap<Hash, usize> × pipeline_depth times per block.
+            // Within the range we must clone the live state because workers update it
+            // in-place (sequential at depth=1, but each job needs a snapshot).
+            let bip30_for_job: Bip30Index = if h > 91855 {
+                Bip30Index::default()
+            } else {
+                bip30_index.clone()
+            };
+
             let job_send = valjob_tx.send(ValidateJob {
                 height: h,
                 block_arc: Arc::clone(&block_arc_d),
                 witnesses_storage: Arc::clone(&witnesses_storage_d),
-                bip30_index: bip30_index.clone(),
+                bip30_index: bip30_for_job,
                 recent_headers: recent_snap,
                 tx_ids: tx_ids_precomputed_d,
                 cached_network_time,
@@ -1736,7 +1786,21 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         keys_v2_buf.clear();
         let witnesses_to_use: &[Vec<Witness>] = witnesses_storage.as_slice();
 
-        bip30_index = vres.bip30_post;
+        // Only propagate the returned BIP30 state while within the exceptional range.
+        // Workers past h=91855 received Bip30Index::default() and updated it with just
+        // one block's worth of entries — accepting that back would evict our accumulated
+        // state. Once the range is cleared we also free the index memory since it is
+        // no longer referenced for anything.
+        if vres.height <= 91855 {
+            bip30_index = vres.bip30_post;
+            if vres.height == 91855 {
+                bip30_index.clear();
+                bip30_index.shrink_to_fit();
+                info!("[IBD] BIP30 exceptional range complete at h=91855 — cleared BIP30 index \
+                       (eliminates per-dispatch clone cost for remaining ~{}k blocks)",
+                    (700_000u64.saturating_sub(91855)) / 1000);
+            }
+        }
         let validation_time = vres.elapsed;
         // vres.result carries only Option<UtxoDelta> — tx ids are not propagated.
         let validation_result = vres.result;
@@ -1761,6 +1825,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         let mut m = staged.lock();
                         m.insert(next_height, delta);
                     }
+                    staged_count.fetch_add(1, Ordering::Relaxed);
                     // Only the dynamic-eviction code path inside the retire helper uses
                     // `blocks_buf` (for `protect_keys_for_next_blocks`). In FIFO/LIFO modes
                     // the cloned Vec<Arc<Block>> is pure waste — one Vec alloc + N Arc bumps
@@ -2444,6 +2509,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 fn run_ibd_retire_loop_with_commitment(
     work_rx: mpsc::Receiver<IbdRetireWork>,
     staged: Arc<Mutex<BTreeMap<u64, Arc<UtxoDelta>>>>,
+    staged_count: Arc<AtomicUsize>,
     local_last_retired: Arc<AtomicU64>,
     publisher: Arc<super::retire_dispatcher::GlobalProgressPublisher>,
     store: Arc<IbdUtxoStore>,
@@ -2596,6 +2662,7 @@ fn run_ibd_retire_loop_with_commitment(
         // covers it. Each shard owns disjoint heights (height % N), so no two shards
         // ever touch the same staged entry.
         staged.lock().remove(&h);
+        staged_count.fetch_sub(1, Ordering::Relaxed);
         if let Some(pkg) = opt_pkg {
             if let Err(e) = push_utxo_flush_from_retire(
                 &store,
@@ -2633,6 +2700,7 @@ fn run_ibd_retire_loop_with_commitment(
 fn run_ibd_retire_loop_no_commitment(
     work_rx: mpsc::Receiver<IbdRetireWork>,
     staged: Arc<Mutex<BTreeMap<u64, Arc<UtxoDelta>>>>,
+    staged_count: Arc<AtomicUsize>,
     local_last_retired: Arc<AtomicU64>,
     publisher: Arc<super::retire_dispatcher::GlobalProgressPublisher>,
     store: Arc<IbdUtxoStore>,
@@ -2745,6 +2813,10 @@ fn run_ibd_retire_loop_no_commitment(
         // covers it. Each shard owns disjoint heights (height % N), so no two shards
         // ever touch the same staged entry.
         staged.lock().remove(&h);
+        // Decrement the lock-free mirror after removal so the orchestrator's
+        // dispatch-backpressure cap sees the freed slot immediately (Relaxed is
+        // sufficient — the orchestrator only reads this for a soft throttle).
+        staged_count.fetch_sub(1, Ordering::Relaxed);
         if let Some(pkg) = opt_pkg {
             if let Err(e) = push_utxo_flush_from_retire(
                 &store,

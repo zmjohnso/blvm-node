@@ -3,6 +3,12 @@
 use blvm_protocol::{segwit::Witness, Block, Hash};
 use std::sync::Arc;
 
+/// Shared block + witnesses used throughout the IBD download→coordinator→prefetch→feeder pipeline.
+/// Wrapping at the download layer (before the mpsc send) means all pipeline stages hold a
+/// single heap allocation; earlier stages moved Block by value producing per-stage copies.
+pub type SharedBlock = Arc<Block>;
+pub type SharedWitnesses = Arc<Vec<Vec<Witness>>>;
+
 use crate::storage::disk_utxo::OutPointKey;
 use blvm_protocol::types::UTXO;
 
@@ -41,10 +47,12 @@ pub fn estimate_block_bytes(block: &Block, witnesses: &[Vec<Witness>]) -> usize 
 /// the validation dispatcher (single-threaded) does **not** rebuild a per-block `UtxoSet`
 /// (~O(outputs) HashMap inserts + Arc allocations) on its hot path — pre-append outputs on
 /// the prefetch pool before validation starts (same role as a spend-prep worker thread).
+/// Block and witnesses are `Arc`-wrapped so this item (and all earlier pipeline stages)
+/// share a single heap allocation rather than duplicating block bytes at every stage.
 pub type ReadyItem = (
     u64,
-    Block,
-    Vec<Vec<Witness>>,
+    SharedBlock,
+    SharedWitnesses,
     Vec<OutPointKey>,
     rustc_hash::FxHashMap<OutPointKey, Arc<UTXO>>,
     Vec<Hash>,
@@ -57,9 +65,10 @@ pub type ReadyItem = (
 /// Sixth field: precomputed `Arc<UtxoSet>` of this block's speculative outputs (built on the
 /// prefetch worker pool — see `ReadyItem`).
 /// Last field: estimated bytes for this entry (used by feeder byte cap tracking).
+/// Both block and witnesses are Arc-shared with earlier pipeline stages — no deep copy here.
 pub type FeederBufferValue = (
-    Arc<Block>,
-    Vec<Vec<Witness>>,
+    SharedBlock,
+    SharedWitnesses,
     Vec<OutPointKey>,
     rustc_hash::FxHashMap<OutPointKey, Arc<UTXO>>,
     Vec<Hash>,
@@ -68,14 +77,15 @@ pub type FeederBufferValue = (
 );
 
 /// IBD v2 prefetch work item: (store, keys_raw, tx_ids, height, block, witnesses).
+/// Block and witnesses are Arc-shared from the download layer — no per-stage deep copies.
 #[cfg(feature = "production")]
 pub type PrefetchWorkItemV2 = (
     Arc<IbdUtxoStore>,
     Vec<OutPointKey>,
     Vec<Hash>,
     u64,
-    Block,
-    Vec<Vec<Witness>>,
+    SharedBlock,
+    SharedWitnesses,
 );
 
 /// Chunk work item for re-queue on drop. Live log 2026-02-21: workers_in_flight=[], chunks lost every 100 blocks.

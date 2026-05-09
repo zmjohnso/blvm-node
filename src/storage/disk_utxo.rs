@@ -80,7 +80,11 @@ pub fn key_to_outpoint(key: &OutPointKey) -> OutPoint {
 
 /// Load UTXOs for given keys from disk. Used by prefetch overlap (spawn_blocking).
 ///
-/// Uses Tree::get_many when available (RocksDB multi_get_cf = 1 batch call vs N get calls).
+/// Uses `Tree::get_many_no_cache`: on RocksDB this calls `multi_get_cf_opt` with
+/// `fill_cache = false`. Prefetch reads each UTXO exactly once; not caching the SST data
+/// blocks prevents cold blocks from evicting hot recently-written UTXO SST blocks in the
+/// dedicated 128 MB UTXO block cache.
+///
 /// Fallback: sequential get. No par_iter (was causing 500+ concurrent get = lock contention).
 ///
 /// Returns `(map, keys_sorted)` so callers can scan the same key set (e.g. in-flight UTXO
@@ -97,7 +101,7 @@ pub(crate) fn load_keys_from_disk(
     for k in &keys {
         key_refs.push(k.as_slice());
     }
-    let values = disk.get_many(&key_refs)?;
+    let values = disk.get_many_no_cache(&key_refs)?;
     let mut result = FxHashMap::with_capacity_and_hasher(keys.len(), Default::default());
     // Serial deserialize: par_iter here was harmful in the IBD hot path. With N validation
     // workers each calling supplement_utxo_map_with_buf concurrently, every worker dispatched

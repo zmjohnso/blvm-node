@@ -37,7 +37,7 @@ use feeder::{new_feeder_state, run_feeder_thread};
 use memory::{MemoryGuard, TIDESDB_MAX_TXN_OPS};
 #[cfg(feature = "production")]
 use types::PrefetchWorkItemV2;
-use types::{estimate_block_bytes, ChunkWorkItem, FeederBufferValue, ReadyItem};
+use types::{estimate_block_bytes, ChunkWorkItem, FeederBufferValue, ReadyItem, SharedBlock, SharedWitnesses};
 
 use crate::network::peer_scoring::is_lan_peer;
 use crate::network::protocol::{
@@ -630,7 +630,7 @@ impl ParallelIBD {
             }
         };
         let (block_tx, mut block_rx) =
-            tokio::sync::mpsc::channel::<(u64, Block, Vec<Vec<Witness>>)>(download_block_queue_cap);
+            tokio::sync::mpsc::channel::<(u64, SharedBlock, SharedWitnesses)>(download_block_queue_cap);
         info!(
             "IBD: download→coordinator channel capacity={} blocks (buffer_limit={}, workers={}, bounded + RAM/env valve)",
             download_block_queue_cap,
@@ -1056,12 +1056,12 @@ impl ParallelIBD {
         let feeder_state = new_feeder_state();
         let feeder_state_for_coord = Arc::clone(&feeder_state);
         tokio::spawn(async move {
-            let mut reorder_buffer: std::collections::BTreeMap<u64, (Block, Vec<Vec<Witness>>)> =
+            let mut reorder_buffer: std::collections::BTreeMap<u64, (SharedBlock, SharedWitnesses)> =
                 std::collections::BTreeMap::new();
             let mut next_prefetch_height = start_height;
             let mut total_received = 0u64;
             const BATCH_DRAIN_LIMIT: usize = 2000; // 10K BPS: larger batches reduce recv overhead
-            let mut batch: Vec<(u64, Block, Vec<Vec<Witness>>)> =
+            let mut batch: Vec<(u64, SharedBlock, SharedWitnesses)> =
                 Vec::with_capacity(BATCH_DRAIN_LIMIT);
             // S2: Reuse buffer for block_input_keys (avoids alloc per block)
             let mut coord_keys_buf: Vec<OutPointKey> = Vec::new();
@@ -1082,8 +1082,8 @@ impl ParallelIBD {
                 Vec<OutPointKey>,
                 Vec<Hash>,
                 u64,
-                Block,
-                Vec<Vec<Witness>>,
+                SharedBlock,
+                SharedWitnesses,
             )| {
                 tokio::task::block_in_place(|| {
                     let item = match prefetch_input_tx_v2_for_coord.try_send(item) {
@@ -1133,7 +1133,7 @@ impl ParallelIBD {
                             .remove(&next_prefetch_height)
                             .expect("contains_key");
                         block_input_keys_and_tx_ids_filtered(
-                            &block,
+                            &*block,
                             &mut coord_tx_ids_buf,
                             &mut coord_keys_buf,
                         );
@@ -1236,7 +1236,7 @@ impl ParallelIBD {
                             .remove(&next_prefetch_height)
                             .expect("contains_key");
                         block_input_keys_and_tx_ids_filtered(
-                            &block,
+                            &*block,
                             &mut coord_tx_ids_buf,
                             &mut coord_keys_buf,
                         );
@@ -1295,7 +1295,7 @@ impl ParallelIBD {
                         // list to MultiGet — sending an empty `keys` would force the validation
                         // worker to re-derive them and fall through to a synchronous disk load.
                         block_input_keys_and_tx_ids_filtered(
-                            &block,
+                            &*block,
                             &mut coord_tx_ids_buf,
                             &mut coord_keys_buf,
                         );
@@ -1335,7 +1335,7 @@ impl ParallelIBD {
                             .remove(&next_prefetch_height)
                             .expect("contains_key");
                         block_input_keys_and_tx_ids_filtered(
-                            &block,
+                            &*block,
                             &mut coord_tx_ids_buf,
                             &mut coord_keys_buf,
                         );
@@ -1870,8 +1870,6 @@ impl ParallelIBD {
 
         let count = pending.len();
         let start = std::time::Instant::now();
-        #[cfg(feature = "profile")]
-        let t_serialize = std::time::Instant::now();
 
         // Unwrap Arcs to get owned Block (sync has completed; refcount should be 1 when validation
         // holds the only Arc after dequeue). Witness Arc is cloned only when try_unwrap fails.
@@ -1885,97 +1883,9 @@ impl ParallelIBD {
 
         let flush_max_height = pending.iter().map(|(_, _, h)| *h).max().unwrap_or(0);
 
-        // Pre-compute all block hashes ONCE (avoids 4x redundant double SHA256 per block)
-        // Parallelize hash computation and serialization for better CPU utilization
-        // header_data uses Arc to avoid cloning Vec on cache hit (batch.put accepts &[u8] via .as_slice())
-        let (block_hashes, block_data, header_data): (Vec<Hash>, Vec<Vec<u8>>, Vec<Arc<Vec<u8>>>) = {
-            let _ibd_header_cache_bypass =
-                crate::storage::serialization_cache::IbdHeaderSerializeCacheBypassGuard::enter();
-            #[cfg(feature = "rayon")]
-            {
-                use blvm_protocol::rayon::iter::IntoParallelRefIterator;
-                use blvm_protocol::rayon::prelude::*;
-                let block_hashes: Vec<Hash> = pending
-                    .par_iter()
-                    .map(|(block, _, _)| blockstore.get_block_hash(block))
-                    .collect();
-
-                // Parallel serialize all block data
-                let block_data: Vec<Vec<u8>> = pending
-                    .par_iter()
-                    .map(|(block, _, _)| {
-                        bincode::serialize(block)
-                            .map_err(|e| anyhow::anyhow!("Block serialization failed: {e}"))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-
-                // Parallel serialize all header data (with caching)
-                use crate::storage::serialization_cache::{
-                    cache_serialized_header, get_cached_serialized_header,
-                };
-                let header_data: Vec<Arc<Vec<u8>>> = pending
-                    .par_iter()
-                    .zip(block_hashes.par_iter())
-                    .map(|((block, _, _), block_hash)| {
-                        if let Some(cached) = get_cached_serialized_header(block_hash) {
-                            return Ok(cached); // Arc::clone already done in get; no Vec clone
-                        }
-                        let serialized = bincode::serialize(&block.header)
-                            .map_err(|e| anyhow::anyhow!("Header serialization failed: {e}"))?;
-                        cache_serialized_header(*block_hash, serialized.clone());
-                        Ok(Arc::new(serialized))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-
-                (block_hashes, block_data, header_data)
-            }
-
-            #[cfg(not(feature = "rayon"))]
-            {
-                let block_hashes: Vec<Hash> = pending
-                    .iter()
-                    .map(|(block, _, _)| blockstore.get_block_hash(block))
-                    .collect();
-
-                // Pre-serialize all block data
-                let block_data: Vec<Vec<u8>> = pending
-                    .iter()
-                    .map(|(block, _, _)| {
-                        bincode::serialize(block)
-                            .map_err(|e| anyhow::anyhow!("Block serialization failed: {e}"))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-
-                // Pre-serialize all header data (with caching)
-                use crate::storage::serialization_cache::{
-                    cache_serialized_header, get_cached_serialized_header,
-                };
-                let header_data: Vec<Arc<Vec<u8>>> = pending
-                    .iter()
-                    .zip(block_hashes.iter())
-                    .map(|((block, _, _), block_hash)| {
-                        if let Some(cached) = get_cached_serialized_header(block_hash) {
-                            return Ok(cached);
-                        }
-                        let serialized = bincode::serialize(&block.header)
-                            .map_err(|e| anyhow::anyhow!("Header serialization failed: {e}"))?;
-                        cache_serialized_header(*block_hash, serialized.clone());
-                        Ok(Arc::new(serialized))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-
-                (block_hashes, block_data, header_data)
-            }
-        };
-
-        #[cfg(feature = "profile")]
-        let serialize_ms = t_serialize.elapsed().as_millis() as u64;
-        #[cfg(feature = "profile")]
-        let t_disk = std::time::Instant::now();
-
-        // Sort flush order by height so LSM writes are monotonic (matches `block_height_row_key`).
-        let mut flush_order: Vec<usize> = (0..pending.len()).collect();
-        flush_order.sort_by_key(|&i| pending[i].2);
+        // Sort by height once so each chunk is already in LSM-friendly order and we
+        // can treat chunk indices as the flush_order directly (no secondary sort needed).
+        pending.sort_by_key(|(_, _, h)| *h);
 
         // Returns true only if there is actual witness data (non-empty stack items).
         // An all-empty Vec<Vec<Witness>> (pre-SegWit blocks) does NOT count as having witnesses
@@ -1985,241 +1895,345 @@ impl ParallelIBD {
                 .any(|tx_w| tx_w.iter().any(|stack| !stack.is_empty()))
         };
 
-        // Pre-serialize witness payloads once (shared by RocksDB unified flush and legacy per-CF batches).
-        let witness_blobs: Vec<Option<Vec<u8>>> =
-            if pending.iter().any(|(_, w, _)| block_has_witness_data(w)) {
+        let n = pending.len();
+        // Serialise and flush in fixed-size chunks to bound peak RSS.
+        // At h=700k each block averages ~1.5 MB serialised; flushing 300 blocks at once
+        // previously allocated ~450 MB for `block_data` and then duplicated those bytes
+        // inside the RocksDB WriteBatch (~900 MB transient spike). A chunk of 50 keeps
+        // the spike at ~75 MB + ~75 MB = ~150 MB per iteration.
+        const FLUSH_BLOCK_CHUNK_SIZE: usize = 50;
+
+        // Saved during the last chunk iteration for the update_tip call below.
+        let mut tip_hash_for_update: Option<Hash> = None;
+
+        for chunk_start in (0..n).step_by(FLUSH_BLOCK_CHUNK_SIZE) {
+            let chunk_end = (chunk_start + FLUSH_BLOCK_CHUNK_SIZE).min(n);
+            let is_last_chunk = chunk_end == n;
+            let chunk = &pending[chunk_start..chunk_end];
+
+            // ── Serialise this chunk ──────────────────────────────────────────────
+            // header_data uses Arc to avoid cloning Vec on cache hit.
+            let (block_hashes, block_data, header_data): (
+                Vec<Hash>,
+                Vec<Vec<u8>>,
+                Vec<Arc<Vec<u8>>>,
+            ) = {
+                let _ibd_header_cache_bypass =
+                    crate::storage::serialization_cache::IbdHeaderSerializeCacheBypassGuard::enter(
+                    );
                 #[cfg(feature = "rayon")]
                 {
                     use blvm_protocol::rayon::iter::IntoParallelRefIterator;
                     use blvm_protocol::rayon::prelude::*;
-                    let witness_data_vec: Vec<(usize, Vec<u8>)> = pending
+                    let block_hashes: Vec<Hash> = chunk
                         .par_iter()
-                        .enumerate()
-                        .filter_map(|(i, (_, witnesses, _))| {
-                            if block_has_witness_data(witnesses) {
-                                match bincode::serialize(witnesses.as_ref()) {
-                                    Ok(data) => Some((i, data)),
-                                    Err(_) => None,
-                                }
-                            } else {
-                                None
-                            }
-                        })
+                        .map(|(block, _, _)| blockstore.get_block_hash(block))
                         .collect();
 
-                    let mut v = vec![None; pending.len()];
-                    for (i, data) in witness_data_vec {
-                        v[i] = Some(data);
-                    }
-                    v
+                    let block_data: Vec<Vec<u8>> = chunk
+                        .par_iter()
+                        .map(|(block, _, _)| {
+                            bincode::serialize(block)
+                                .map_err(|e| anyhow::anyhow!("Block serialization failed: {e}"))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+
+                    use crate::storage::serialization_cache::{
+                        cache_serialized_header, get_cached_serialized_header,
+                    };
+                    let header_data: Vec<Arc<Vec<u8>>> = chunk
+                        .par_iter()
+                        .zip(block_hashes.par_iter())
+                        .map(|((block, _, _), block_hash)| {
+                            if let Some(cached) = get_cached_serialized_header(block_hash) {
+                                return Ok(cached);
+                            }
+                            let serialized = bincode::serialize(&block.header).map_err(|e| {
+                                anyhow::anyhow!("Header serialization failed: {e}")
+                            })?;
+                            cache_serialized_header(*block_hash, serialized.clone());
+                            Ok(Arc::new(serialized))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+
+                    (block_hashes, block_data, header_data)
                 }
 
                 #[cfg(not(feature = "rayon"))]
                 {
-                    let mut v = vec![None; pending.len()];
-                    for i in 0..pending.len() {
-                        let witnesses = &pending[i].1;
-                        if block_has_witness_data(witnesses) {
-                            v[i] = Some(bincode::serialize(witnesses.as_ref()).map_err(|e| {
-                                anyhow::anyhow!("Failed to serialize witnesses: {}", e)
-                            })?);
-                        }
-                    }
-                    v
+                    use crate::storage::serialization_cache::{
+                        cache_serialized_header, get_cached_serialized_header,
+                    };
+                    let block_hashes: Vec<Hash> = chunk
+                        .iter()
+                        .map(|(block, _, _)| blockstore.get_block_hash(block))
+                        .collect();
+
+                    let block_data: Vec<Vec<u8>> = chunk
+                        .iter()
+                        .map(|(block, _, _)| {
+                            bincode::serialize(block)
+                                .map_err(|e| anyhow::anyhow!("Block serialization failed: {e}"))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+
+                    let header_data: Vec<Arc<Vec<u8>>> = chunk
+                        .iter()
+                        .zip(block_hashes.iter())
+                        .map(|((block, _, _), block_hash)| {
+                            if let Some(cached) = get_cached_serialized_header(block_hash) {
+                                return Ok(cached);
+                            }
+                            let serialized = bincode::serialize(&block.header).map_err(|e| {
+                                anyhow::anyhow!("Header serialization failed: {e}")
+                            })?;
+                            cache_serialized_header(*block_hash, serialized.clone());
+                            Ok(Arc::new(serialized))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+
+                    (block_hashes, block_data, header_data)
                 }
-            } else {
-                vec![None; pending.len()]
             };
 
-        let metadata_blobs: Vec<Vec<u8>> = (0..pending.len())
-            .map(|i| {
-                let metadata = BlockMetadata {
-                    n_tx: pending[i].0.transactions.len() as u32,
-                };
-                bincode::serialize(&metadata)
-                    .map_err(|e| anyhow::anyhow!("Block metadata serialization failed: {}", e))
-            })
-            .collect::<Result<Vec<_>>>()?;
+            let witness_blobs: Vec<Option<Vec<u8>>> =
+                if chunk.iter().any(|(_, w, _)| block_has_witness_data(w)) {
+                    #[cfg(feature = "rayon")]
+                    {
+                        use blvm_protocol::rayon::iter::IntoParallelRefIterator;
+                        use blvm_protocol::rayon::prelude::*;
+                        let witness_data_vec: Vec<(usize, Vec<u8>)> = chunk
+                            .par_iter()
+                            .enumerate()
+                            .filter_map(|(i, (_, witnesses, _))| {
+                                if block_has_witness_data(witnesses) {
+                                    match bincode::serialize(witnesses.as_ref()) {
+                                        Ok(data) => Some((i, data)),
+                                        Err(_) => None,
+                                    }
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
 
-        // Reuse `header_data` from the parallel serialize pass (avoid double bincode of last 11).
-        #[cfg(any(feature = "rocksdb", feature = "redb", feature = "tidesdb"))]
-        let recent_entries: Vec<(u64, Vec<u8>)> = flush_order
-            .iter()
-            .rev()
-            .take(11)
-            .map(|&idx| {
-                let h = pending[idx].2;
-                let data = header_data[idx].as_slice().to_vec();
-                Ok((h, data))
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let heights: Vec<u64> = pending.iter().map(|(_, _, h)| *h).collect();
-
-        let mut storage_unified = false;
-        #[cfg(feature = "rocksdb")]
-        {
-            if blockstore.try_ibd_flush_rocksdb_unified(
-                &flush_order,
-                &heights,
-                &block_hashes,
-                &block_data,
-                &header_data,
-                &witness_blobs,
-                &metadata_blobs,
-                &recent_entries,
-            )? {
-                storage_unified = true;
-            }
-        }
-        #[cfg(feature = "redb")]
-        {
-            if !storage_unified
-                && blockstore.try_ibd_flush_redb_unified(
-                    &flush_order,
-                    &heights,
-                    &block_hashes,
-                    &block_data,
-                    &header_data,
-                    &witness_blobs,
-                    &metadata_blobs,
-                    &recent_entries,
-                )?
-            {
-                storage_unified = true;
-            }
-        }
-        #[cfg(feature = "tidesdb")]
-        {
-            if !storage_unified
-                && blockstore.try_ibd_flush_tidesdb_unified(
-                    &flush_order,
-                    &heights,
-                    &block_hashes,
-                    &block_data,
-                    &header_data,
-                    &witness_blobs,
-                    &metadata_blobs,
-                    &recent_entries,
-                )?
-            {
-                storage_unified = true;
-            }
-        }
-
-        if !storage_unified {
-            // Per-tree batches (Redb, Sled, TidesDB, or non-Rocks `Arc<dyn Database>`).
-            // Batch write blocks (no WAL — safe for IBD, re-downloads on crash)
-            {
-                let blocks_tree = blockstore.blocks_tree()?;
-                let mut batch = blocks_tree.batch()?;
-                for &i in &flush_order {
-                    let height = pending[i].2;
-                    let key = block_height_row_key(height, &block_hashes[i]);
-                    batch.put(&key, &block_data[i]);
-                }
-                batch.commit_no_wal()?;
-            }
-
-            // Batch write headers
-            {
-                let headers_tree = blockstore.headers_tree()?;
-                let mut batch = headers_tree.batch()?;
-                for &i in &flush_order {
-                    let height = pending[i].2;
-                    let key = block_height_row_key(height, &block_hashes[i]);
-                    batch.put(&key, header_data[i].as_slice());
-                }
-                batch.commit_no_wal()?;
-            }
-
-            // Batch write witnesses (skip if no actual witness data — common in pre-SegWit chain)
-            {
-                let has_witnesses = witness_blobs.iter().any(|b| b.is_some());
-                if has_witnesses {
-                    let witnesses_tree = blockstore.witnesses_tree()?;
-                    let mut batch = witnesses_tree.batch()?;
-                    for &i in &flush_order {
-                        if let Some(ref data) = witness_blobs[i] {
-                            let height = pending[i].2;
-                            let key = block_height_row_key(height, &block_hashes[i]);
-                            batch.put(&key, data);
+                        let mut v = vec![None; chunk.len()];
+                        for (i, data) in witness_data_vec {
+                            v[i] = Some(data);
                         }
+                        v
+                    }
+
+                    #[cfg(not(feature = "rayon"))]
+                    {
+                        let mut v = vec![None; chunk.len()];
+                        for i in 0..chunk.len() {
+                            let witnesses = &chunk[i].1;
+                            if block_has_witness_data(witnesses) {
+                                v[i] = Some(
+                                    bincode::serialize(witnesses.as_ref()).map_err(|e| {
+                                        anyhow::anyhow!("Failed to serialize witnesses: {}", e)
+                                    })?,
+                                );
+                            }
+                        }
+                        v
+                    }
+                } else {
+                    vec![None; chunk.len()]
+                };
+
+            let metadata_blobs: Vec<Vec<u8>> = (0..chunk.len())
+                .map(|i| {
+                    let metadata = BlockMetadata {
+                        n_tx: chunk[i].0.transactions.len() as u32,
+                    };
+                    bincode::serialize(&metadata)
+                        .map_err(|e| anyhow::anyhow!("Block metadata serialization failed: {}", e))
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            // flush_order is 0..chunk.len() — pending was sorted by height above, so each
+            // chunk is already in ascending height order; no secondary sort needed.
+            let flush_order: Vec<usize> = (0..chunk.len()).collect();
+            let chunk_heights: Vec<u64> = chunk.iter().map(|(_, _, h)| *h).collect();
+
+            // RECENT_HEADERS_TABLE is a sliding window of the last ~11 blocks. Only the
+            // final chunk's entries matter for the end state; passing empty for earlier
+            // chunks produces the same result without touching the table N-1 extra times.
+            #[cfg(any(feature = "rocksdb", feature = "redb", feature = "tidesdb"))]
+            let recent_entries: Vec<(u64, Vec<u8>)> = if is_last_chunk {
+                flush_order
+                    .iter()
+                    .rev()
+                    .take(11)
+                    .map(|&idx| {
+                        let h = chunk[idx].2;
+                        let data = header_data[idx].as_slice().to_vec();
+                        Ok((h, data))
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            } else {
+                vec![]
+            };
+
+            // Save the tip block hash from the last block in the sorted last chunk.
+            if is_last_chunk {
+                tip_hash_for_update = block_hashes.last().copied();
+            }
+
+            // ── Write this chunk ──────────────────────────────────────────────────
+            let mut storage_unified = false;
+            #[cfg(feature = "rocksdb")]
+            {
+                if blockstore.try_ibd_flush_rocksdb_unified(
+                    &flush_order,
+                    &chunk_heights,
+                    &block_hashes,
+                    &block_data,
+                    &header_data,
+                    &witness_blobs,
+                    &metadata_blobs,
+                    &recent_entries,
+                )? {
+                    storage_unified = true;
+                }
+            }
+            #[cfg(feature = "redb")]
+            {
+                if !storage_unified
+                    && blockstore.try_ibd_flush_redb_unified(
+                        &flush_order,
+                        &chunk_heights,
+                        &block_hashes,
+                        &block_data,
+                        &header_data,
+                        &witness_blobs,
+                        &metadata_blobs,
+                        &recent_entries,
+                    )?
+                {
+                    storage_unified = true;
+                }
+            }
+            #[cfg(feature = "tidesdb")]
+            {
+                if !storage_unified
+                    && blockstore.try_ibd_flush_tidesdb_unified(
+                        &flush_order,
+                        &chunk_heights,
+                        &block_hashes,
+                        &block_data,
+                        &header_data,
+                        &witness_blobs,
+                        &metadata_blobs,
+                        &recent_entries,
+                    )?
+                {
+                    storage_unified = true;
+                }
+            }
+
+            if !storage_unified {
+                // Per-tree batches (Redb, Sled, TidesDB, or non-Rocks `Arc<dyn Database>`).
+                {
+                    let blocks_tree = blockstore.blocks_tree()?;
+                    let mut batch = blocks_tree.batch()?;
+                    for &i in &flush_order {
+                        let height = chunk[i].2;
+                        let key = block_height_row_key(height, &block_hashes[i]);
+                        batch.put(&key, &block_data[i]);
                     }
                     batch.commit_no_wal()?;
                 }
-            }
-
-            // Batch write height index
-            {
-                let height_tree = blockstore.height_tree()?;
-                let mut batch = height_tree.batch()?;
-                for &i in &flush_order {
-                    let height = pending[i].2;
-                    let height_key = height.to_be_bytes();
-                    batch.put(&height_key, &block_hashes[i]);
+                {
+                    let headers_tree = blockstore.headers_tree()?;
+                    let mut batch = headers_tree.batch()?;
+                    for &i in &flush_order {
+                        let height = chunk[i].2;
+                        let key = block_height_row_key(height, &block_hashes[i]);
+                        batch.put(&key, header_data[i].as_slice());
+                    }
+                    batch.commit_no_wal()?;
                 }
-                batch.commit_no_wal()?;
-            }
-
-            // Reverse index (hash → height) — required for RPC lookups and chain recovery
-            {
-                let ht_tree = blockstore.hash_to_height_tree()?;
-                let mut batch = ht_tree.batch()?;
-                for &i in &flush_order {
-                    let height_bytes = pending[i].2.to_be_bytes();
-                    batch.put(&block_hashes[i], &height_bytes);
+                {
+                    let has_witnesses = witness_blobs.iter().any(|b| b.is_some());
+                    if has_witnesses {
+                        let witnesses_tree = blockstore.witnesses_tree()?;
+                        let mut batch = witnesses_tree.batch()?;
+                        for &i in &flush_order {
+                            if let Some(ref data) = witness_blobs[i] {
+                                let height = chunk[i].2;
+                                let key = block_height_row_key(height, &block_hashes[i]);
+                                batch.put(&key, data);
+                            }
+                        }
+                        batch.commit_no_wal()?;
+                    }
                 }
-                batch.commit_no_wal()?;
-            }
-
-            // Block metadata (same row keys as bodies — keeps RPC n_tx consistent with `store_block_with_witness`)
-            {
-                let meta_tree = blockstore.metadata_tree()?;
-                let mut batch = meta_tree.batch()?;
-                for &i in &flush_order {
-                    let key = block_height_row_key(pending[i].2, &block_hashes[i]);
-                    batch.put(&key, &metadata_blobs[i]);
+                {
+                    let height_tree = blockstore.height_tree()?;
+                    let mut batch = height_tree.batch()?;
+                    for &i in &flush_order {
+                        let height = chunk[i].2;
+                        let height_key = height.to_be_bytes();
+                        batch.put(&height_key, &block_hashes[i]);
+                    }
+                    batch.commit_no_wal()?;
                 }
-                batch.commit_no_wal()?;
+                {
+                    let ht_tree = blockstore.hash_to_height_tree()?;
+                    let mut batch = ht_tree.batch()?;
+                    for &i in &flush_order {
+                        let height_bytes = chunk[i].2.to_be_bytes();
+                        batch.put(&block_hashes[i], &height_bytes);
+                    }
+                    batch.commit_no_wal()?;
+                }
+                {
+                    let meta_tree = blockstore.metadata_tree()?;
+                    let mut batch = meta_tree.batch()?;
+                    for &i in &flush_order {
+                        let key = block_height_row_key(chunk[i].2, &block_hashes[i]);
+                        batch.put(&key, &metadata_blobs[i]);
+                    }
+                    batch.commit_no_wal()?;
+                }
+                // Recent headers only needed for the last chunk (same rationale as above).
+                if is_last_chunk {
+                    let recent_batch: Vec<(u64, &BlockHeader)> = chunk
+                        .iter()
+                        .rev()
+                        .take(11)
+                        .map(|(block, _, height)| (*height, &block.header))
+                        .collect();
+                    blockstore.store_recent_headers_ibd_batch(&recent_batch)?;
+                }
             }
-
-            // Store recent headers (needed for MTP calculation) — single batch vs N small writes.
-            let recent_batch: Vec<(u64, &BlockHeader)> = pending
-                .iter()
-                .rev()
-                .take(11)
-                .map(|(block, _, height)| (*height, &block.header))
-                .collect();
-            blockstore.store_recent_headers_ibd_batch(&recent_batch)?;
+            // block_data, header_data, witness_blobs, metadata_blobs are dropped here,
+            // releasing the serialised bytes before the next chunk is allocated.
         }
 
         #[cfg(feature = "profile")]
         {
-            let disk_ms = t_disk.elapsed().as_millis() as u64;
             blvm_protocol::profile_log!(
-                "[FLUSH_STORAGE_PERF] blocks={} max_height={} serialize_ms={} disk_ms={} total_ms={}",
+                "[FLUSH_STORAGE_PERF] blocks={} max_height={} total_ms={}",
                 count,
                 flush_max_height,
-                serialize_ms,
-                disk_ms,
                 start.elapsed().as_millis()
             );
         }
 
-        // Skip transaction indexing during IBD - it's not needed until sync is complete
-        // and causes massive slowdowns due to individual writes per transaction
-
         // Chain metadata: parallel IBD bypasses `run_loop`, so `update_tip` must run here
         // or `get_height()` / restarts see `chain_info` missing despite full block index.
+        // pending is sorted by height; last entry is the tip.
         if let Some(storage) = _storage {
-            if let Some((idx, _)) = pending.iter().enumerate().max_by_key(|(_, (_, _, h))| *h) {
-                let block = &pending[idx].0;
-                let tip_height = pending[idx].2;
-                let tip_hash = block_hashes[idx];
-                storage
-                    .chain()
-                    .update_tip(&tip_hash, &block.header, tip_height)?;
+            if let Some(tip_hash) = tip_hash_for_update {
+                if let Some((block, _, tip_height)) = pending.last() {
+                    storage
+                        .chain()
+                        .update_tip(&tip_hash, &block.header, *tip_height)?;
+                }
             }
         }
 

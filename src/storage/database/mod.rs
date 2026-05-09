@@ -53,6 +53,20 @@ pub trait Tree: Send + Sync {
         Ok(results)
     }
 
+    /// Like `get_many` but requests that the backend skip populating its block cache.
+    ///
+    /// Use for IBD prefetch reads: each UTXO is loaded once, used for one block, then the
+    /// entry is retired. Filling the UTXO block cache (128 MB on 16 GB hosts) with these
+    /// cold SST data blocks evicts hot recently-written blocks that subsequent prefetch rounds
+    /// are more likely to re-read. Setting `fill_cache = false` leaves the cache state
+    /// unchanged and avoids an unnecessary cache-insertion cost per key.
+    ///
+    /// Default: delegates to `get_many` (correct for all non-RocksDB backends, and for
+    /// RocksDB builds where the opt path is not compiled in).
+    fn get_many_no_cache(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>> {
+        self.get_many(keys)
+    }
+
     /// Remove a key-value pair
     fn remove(&self, key: &[u8]) -> Result<()>;
 
@@ -1117,7 +1131,8 @@ pub mod rocksdb_impl {
     use super::{BatchWriter, Database, Tree};
     use anyhow::Result;
     use rocksdb::{
-        BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, Options, WriteOptions, DB,
+        BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, Options, ReadOptions,
+        WriteOptions, DB,
     };
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1954,6 +1969,27 @@ pub mod rocksdb_impl {
             let mut results = Vec::with_capacity(raw.len());
             for r in raw {
                 results.push(r.map_err(|e| anyhow::anyhow!("RocksDB multi_get: {}", e))?);
+            }
+            Ok(results)
+        }
+
+        fn get_many_no_cache(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>> {
+            if keys.is_empty() {
+                return Ok(Vec::new());
+            }
+            let cf = self.cf()?;
+            let mut opts = ReadOptions::default();
+            // IBD prefetch reads each UTXO once; skip the block-cache insertion so that
+            // cold SST data blocks don't evict hot index/data blocks. This keeps the 128 MB
+            // UTXO block cache populated with recently-written SST blocks that have higher
+            // temporal reuse across sequential prefetch batches.
+            opts.fill_cache(false);
+            let mut pairs = Vec::with_capacity(keys.len());
+            pairs.extend(keys.iter().map(|k| (cf, *k)));
+            let raw = self.db.multi_get_cf_opt(pairs, &opts);
+            let mut results = Vec::with_capacity(raw.len());
+            for r in raw {
+                results.push(r.map_err(|e| anyhow::anyhow!("RocksDB multi_get_no_cache: {}", e))?);
             }
             Ok(results)
         }

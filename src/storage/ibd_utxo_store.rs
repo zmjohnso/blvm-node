@@ -484,11 +484,20 @@ impl IbdUtxoStore {
             // that lets mimalloc actually return pages to the OS: without it, the HashMap
             // keeps all its bucket slots alive (preventing page decommit) even after all the
             // Arc<UTXO>s in those buckets are dropped.
-            // Only shrink when we've actually dropped a substantial fraction of entries to avoid
-            // thrashing the shard locks on minor pressure adjustments. The previous condition
-            // `current_len < new_cap * 8/10` was always false right after eviction (current_len
-            // converges to new_cap), so it never fired. Use the cap reduction ratio instead.
-            if new_cap < old * 8 / 10 {
+            // Shrink the backing HashMap allocation when:
+            //   (a) the cap dropped by ≥20% in one call (large adaptive cut), OR
+            //   (b) the cap dropped by any amount AND the live entry count is already below
+            //       70% of new_cap — meaning eviction has genuinely freed entries and the
+            //       DashMap backing arrays are now significantly over-allocated.
+            //
+            // Without (b), successive 10%-per-call adaptive shrinks (the common path under
+            // mild-to-moderate pressure) never satisfied the old `new_cap < old * 8/10`
+            // condition, so the DashMap kept capacity for the peak entry count indefinitely —
+            // wasting 100–200 MB of RSS even after the logical cache shrank substantially.
+            let cache_len = self.cache.len();
+            let large_cut = new_cap < old * 8 / 10;
+            let live_below_cap = new_cap < old && cache_len < new_cap * 7 / 10;
+            if large_cut || live_below_cap {
                 self.cache.shrink_to_fit();
             }
         }
@@ -748,8 +757,12 @@ impl IbdUtxoStore {
         if len == 0 {
             return;
         }
-        // Under Emergency, keep only 1/8 of max_entries.
-        let keep = self.max_entries_effective() / 8;
+        // Under Emergency, keep only 1/8 of max_entries, but never below the working-set
+        // floor. Dropping the cache to near-zero causes every subsequent block's inputs
+        // (~5–8k UTXOs at h=700k) to miss and go to RocksDB — which can be slower than
+        // the OOM pressure itself. 64k entries (~12 MB) covers several blocks' working set
+        // and keeps the pipeline alive while RSS recovers.
+        let keep = (self.max_entries_effective() / 8).max(64_000);
         let to_evict = len.saturating_sub(keep);
         if to_evict == 0 {
             return;
@@ -1286,7 +1299,11 @@ impl IbdUtxoStore {
         max_block_height_inclusive: u64,
     ) -> Vec<PendingLogEntry> {
         let approx = self.pending_log_size.load(Ordering::Relaxed);
-        let mut all = Vec::with_capacity(approx.min(65536));
+        // Allocate for the full expected drain size. The old min(65536) cap caused
+        // 2–3 Vec reallocations per flush at h=300k+ (320k pending entries × 56B each
+        // = ~18 MB re-copy). approx is a slightly-stale atomic counter but always the
+        // right order-of-magnitude for the expected drain count.
+        let mut all = Vec::with_capacity(approx);
         let mut drained = 0usize;
         // Fast path when validation is far ahead of retire (workers fill shards with
         // entries for heights far above `max_block_height_inclusive`). The previous

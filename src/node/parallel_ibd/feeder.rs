@@ -14,7 +14,7 @@ use parking_lot::{Condvar, Mutex};
 use crossbeam_channel::Receiver;
 
 // Static buffer limits passed at startup; no dynamic recalculation needed.
-use super::types::{estimate_block_bytes, FeederBufferValue, ReadyItem};
+use super::types::{estimate_block_bytes, FeederBufferValue, ReadyItem, SharedBlock, SharedWitnesses};
 
 /// Height-partitioned pending blocks. With one shard this matches a single `BTreeMap`.
 pub(crate) struct FeederBuffer {
@@ -100,8 +100,10 @@ pub(crate) fn run_feeder_thread(
     feeder_buffer_bytes_limit: usize,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        // `b: SharedBlock = Arc<Block>` and `w: SharedWitnesses = Arc<Vec<Vec<Witness>>>` —
+        // block bytes were allocated once at download; all pipeline stages share this Arc.
         while let Ok((h, b, w, keys, u, tx_ids, spec_adds)) = ready_rx.recv() {
-            let est_bytes = estimate_block_bytes(&b, &w);
+            let est_bytes = estimate_block_bytes(b.as_ref(), w.as_ref());
             let mut guard = feeder_state.0.lock();
             while (guard.0.len() >= feeder_buffer_limit
                 || guard.2 + est_bytes > feeder_buffer_bytes_limit)
@@ -115,7 +117,7 @@ pub(crate) fn run_feeder_thread(
             let buffer_was_empty = guard.0.is_empty();
             guard
                 .0
-                .insert(h, (Arc::new(b), w, keys, u, tx_ids, spec_adds, est_bytes));
+                .insert(h, (b, w, keys, u, tx_ids, spec_adds, est_bytes));
             guard.2 += est_bytes;
             #[cfg(feature = "profile")]
             if buffer_was_empty {

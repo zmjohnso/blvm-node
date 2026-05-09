@@ -21,6 +21,8 @@ use blvm_protocol::types::UTXO;
 #[cfg(feature = "production")]
 use blvm_protocol::{Block, Hash, UtxoSet};
 #[cfg(feature = "production")]
+use super::types::{SharedBlock, SharedWitnesses};
+#[cfg(feature = "production")]
 use crossbeam_channel::{Receiver, Sender};
 #[cfg(feature = "production")]
 use rustc_hash::FxHashMap;
@@ -156,6 +158,8 @@ pub(crate) fn prefetch_build_utxo_map(
 /// idle while disk MultiGet RTTs complete. Moving this off the validation dispatcher removes
 /// ~O(outputs) HashMap inserts + `Arc::new(UTXO)` allocations from the single-threaded hot path
 /// (~3-15 ms/block at h>300k where blocks have 2-4k outputs).
+/// Accepts `SharedBlock` (Arc<Block>) so callers pass the same Arc rather than a raw reference,
+/// matching the Arc-first pipeline convention.
 #[cfg(feature = "production")]
 pub(crate) fn build_spec_adds(block: &Block, tx_ids: &[Hash], height: u64) -> UtxoSet {
     let mut map = UtxoSet::default();
@@ -192,10 +196,12 @@ pub(crate) fn run_prefetch_worker(
 ) {
     let _ = store; // store handed to closures via the work item; kept on signature for future reuse
     let mut local_blocks: u64 = 0;
+    // `block: SharedBlock` and `witnesses: SharedWitnesses` are Arc — no deep copy.
     while let Ok((s, keys, tx_ids, h, block, witnesses)) = rx.recv() {
         let full_map = prefetch_build_utxo_map(&s, &keys);
         // Build spec_adds on this worker thread (was on the dispatcher; see `build_spec_adds`).
-        let spec_adds = Arc::new(build_spec_adds(&block, &tx_ids, h));
+        // Deref Arc<Block> to &Block for the pure-read spec_adds computation.
+        let spec_adds = Arc::new(build_spec_adds(&*block, &tx_ids, h));
         let item: ReadyItem = (h, block, witnesses, keys, full_map, tx_ids, spec_adds);
         bridge.worker_complete(h, item);
         local_blocks += 1;

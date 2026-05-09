@@ -405,9 +405,12 @@ impl MemoryGuard {
             // Clearly above ~18 GiB physical — larger baseline for mid-tier workstations.
             ((available_mb * 50 / 100) as usize).clamp(2048, 4096)
         } else if total_gb >= 16 {
-            // Exact ~16 GiB bucket (`total_gb = (total_mb+512)/1024`): desktops share RAM with OS,
-            // browser, IDE — smaller nominal cache reduces swap/OOM vs chasing peak BPS alone.
-            ((available_mb * 38 / 100) as usize).clamp(1280, 2560)
+            // ~16 GiB bucket: desktops share RAM with OS, browser, IDE. mimalloc retains arena
+            // pages after eviction so the cache high-water mark sets the RSS floor that the
+            // adaptive shrinker can never recover below. 2560 MB → ~10 GB RSS at peak + desktop
+            // workload → OOM (observed). Cap at 1400 MB so the mimalloc high-water mark stays
+            // below ~2 GB, keeping total RSS well under OOM territory.
+            ((available_mb * 30 / 100) as usize).clamp(1024, 1400)
         } else if total_gb >= 12 {
             ((available_mb * 25 / 100) as usize).clamp(768, 1536)
         } else {
@@ -437,10 +440,10 @@ impl MemoryGuard {
         //   • Mimalloc arena fragmentation: freed Arc<UTXO> objects don't immediately return pages
         //     to OS — the allocator retains the segment until ALL objects in it are freed
         //   • RocksDB memory growing with the DB: block cache fills, compaction buffers accumulate
-        // At 1600B/entry: utxo_cache_mb=3072 → ~1.9M entries → actual RSS ≈ 3 GB for cache data.
-        // Combined with RocksDB (~1.5 GB) and runtime (~0.8 GB), total stays ~5.3 GB on 16 GB,
-        // leaving 4-5 GB of headroom and eliminating the swap death-spiral we observed when
-        // the old 5.7M-entry cap pushed RSS to 10-11.5 GB on 16 GB hosts.
+        // At 1600B/entry: utxo_cache_mb=1400 → ~875k entries → cache RSS ≈ 1.4 GB.
+        // mimalloc high-water mark (arenas retained after eviction) matches the cap, so
+        // total stays ~1.4 (cache) + 1.5 (RocksDB) + 0.9 (download queue) + 0.5 (other)
+        // ≈ 4.3 GB on 16 GB — well clear of OOM even with a 6 GB desktop workload.
         let utxo_max_entries = utxo_cache_mb * 1024 * 1024 / 1600;
 
         // UTXO flush threshold — larger batches reduce L0 SST creation rate and compaction churn.
@@ -508,7 +511,12 @@ impl MemoryGuard {
         };
 
         // Storage flush interval (blocks buffered before async blockstore flush).
-        let mut storage_flush_interval = if total_gb >= 32 { 2000 } else { 500 };
+        // The byte-cap in storage_flush_pending_bytes_pressure_cap_for bounds block RAM
+        // at late heights (where each block ≈ 1–1.5 MB) even under PressureLevel::None;
+        // this count-based interval is the primary trigger at early heights (small blocks).
+        // 300 on <32 GiB (was 500): reduces the peak "non-pressure" accumulation window
+        // from ~750 MB to ~450 MB at h=700k (300 × 1.5 MB).
+        let mut storage_flush_interval = if total_gb >= 32 { 2000 } else { 300 };
         if let Ok(s) = std::env::var("BLVM_IBD_STORAGE_FLUSH_INTERVAL") {
             if let Ok(n) = s.parse::<usize>() {
                 // Same bounds as chunk_size-style knobs: avoid tiny flushes or OOM-sized buffers.
@@ -634,11 +642,14 @@ impl MemoryGuard {
                 } else if total_mb >= 24 * 1024 {
                     57
                 } else if total_mb <= Self::EXTENDED_SIXTEEN_CLASS_MB {
-                    // ≤~18 GiB physical — kernel OOM was observed ~11–12 GiB RSS with swap full + desktop workload.
-                    // Tighter budget shrinks adaptive UTXO cache earlier than chasing peak BPS at 65%.
-                    54
+                    // ≤~18 GiB physical. Budget from available_mb (not total_mb): a desktop
+                    // workload already consumes ~6 GB, so total_mb×54% = 8.6 GB on a 15.9 GB
+                    // machine left only ~1.4 GB system headroom → OOM at h≈64k (swap-full).
+                    // available_mb×60% accounts for what the OS can actually spare at boot.
+                    let from_avail = (available_mb * 60 / 100).clamp(3000, 7000);
+                    return from_avail.max(2048);
                 } else {
-                    // ~17–23 GiB
+                    // ~17–23 GiB
                     60
                 };
                 (total_mb * pct / 100).max(2048)
@@ -724,18 +735,28 @@ impl MemoryGuard {
     }
 
     /// Pure-function variant — see [`Self::storage_flush_interval_live_for`].
+    ///
+    /// At `PressureLevel::None` / `Elevated` we now apply a byte cap (20% / 12% of budget)
+    /// instead of returning `None`. Without this, `pending_blocks` could accumulate up to
+    /// the full `storage_flush_interval` × block-size — at h=700k that is ~450 MB (300 ×
+    /// 1.5 MB) with the new 300-block interval, or up to 3 GB on 32+ GiB hosts with the
+    /// 2000-block interval. The cap ensures blocks are flushed before their Arcs pin that
+    /// memory too long. The `pressure_min_blocks` floor (≥ 40% of the live interval, min 96)
+    /// prevents very-small-block heights from triggering spurious micro-flushes.
     #[inline]
     pub(crate) fn storage_flush_pending_bytes_pressure_cap_for(
         budget_mb: u64,
         pressure: PressureLevel,
     ) -> Option<u64> {
         let pct: u64 = match pressure {
-            PressureLevel::None | PressureLevel::Elevated => return None,
+            PressureLevel::None => 20,
+            PressureLevel::Elevated => 12,
             PressureLevel::Critical => 6,
             PressureLevel::Emergency => 4,
         };
         let raw = budget_mb.saturating_mul(1024 * 1024).saturating_mul(pct) / 100;
-        Some(raw.max(32 * 1024 * 1024))
+        // 64 MiB hard floor: avoids micro-flushes on tiny-budget or very-early-chain scenarios.
+        Some(raw.max(64 * 1024 * 1024))
     }
 
     /// Minimum pending block count before a pressure byte cap can trigger a flush.
