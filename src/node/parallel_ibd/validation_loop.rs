@@ -329,7 +329,12 @@ fn retire_flush_batch_size() -> usize {
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|n: &usize| *n >= 1)
-        .unwrap_or(8)
+        // 16 async commits before each durability flush (was 8). Each commit writes
+        // ~19 MB to the ibd_utxos memtable; 16 × 19 MB = 304 MB before flush_disk.
+        // With max_write_buffer_number=10 × 64 MB = 640 MB capacity, no memtable stall.
+        // Halves the number of flush_disk calls vs the old default of 8, reducing
+        // durability-drain stalls (pipeline pauses) at h=160-300k by ~2×.
+        .unwrap_or(16)
 }
 
 /// Push a UTXO disk flush from the retire thread; joins older flushes when the in-flight cap is hit.
@@ -353,7 +358,7 @@ fn retire_flush_batch_size() -> usize {
 fn push_utxo_flush_from_retire(
     store: &Arc<IbdUtxoStore>,
     storage_wm: &Arc<Storage>,
-    utxo_flush_handles: &Arc<Mutex<VecDeque<JoinHandle<Result<()>>>>>,
+    utxo_flush_handles: &Arc<Mutex<VecDeque<JoinHandle<Result<blvm_muhash::MuHash3072>>>>>,
     retire_flush_counter: &Arc<AtomicUsize>,
     next_height: u64,
     max_utxo_flushes_in_flight: usize,
@@ -367,6 +372,10 @@ fn push_utxo_flush_from_retire(
     // want a clean checkpoint before workload heats up) and every Nth thereafter.
     let do_durability = batch_count <= 1 || n % batch_count == 0;
     let mut q = utxo_flush_handles.lock();
+    // flush_limit cap: join the oldest in-flight commit to keep concurrency bounded.
+    // Each joined thread returns its local MuHash3072 sub-accumulator; we fold it into
+    // the global accumulator here. The lock is held for a single Num3072 multiply
+    // (~10 µs), not for the full batch muhash loop (was seconds under the old design).
     while q.len() >= flush_limit {
         let Some(handle) = q.pop_front() else {
             return Err(anyhow::anyhow!(
@@ -374,7 +383,10 @@ fn push_utxo_flush_from_retire(
             ));
         };
         match handle.join() {
-            Ok(Ok(())) => {}
+            Ok(Ok(sub_mh)) => {
+                let mut mh_guard = ibd_muhash.lock();
+                *mh_guard = std::mem::take(&mut *mh_guard).multiply(&sub_mh);
+            }
             Ok(Err(e)) => return Err(e),
             Err(e) => {
                 return Err(anyhow::anyhow!("UTXO flush panicked: {:?}", e));
@@ -389,9 +401,18 @@ fn push_utxo_flush_from_retire(
         // the watermark could advance past not-yet-committed data on a slow-async/fast-sync
         // race. After the drain, we run this package's commit, then flush_disk, then
         // persist_ibd_utxo_flush_checkpoint atomically as the durability boundary.
+        //
+        // Parallel MuHash: async threads each computed a *local* MuHash3072 sub-accumulator
+        // (no shared mutex during their execution). We collect all sub-accumulators here and
+        // fold them into the global accumulator with a single brief lock — replacing the
+        // previous per-thread mutex hold (seconds each, serialized) with a batch of
+        // microsecond-cost Num3072 multiplies.
+        let mut combined_sub_mh = blvm_muhash::MuHash3072::new();
         while let Some(handle) = q.pop_front() {
             match handle.join() {
-                Ok(Ok(())) => {}
+                Ok(Ok(sub_mh)) => {
+                    combined_sub_mh = combined_sub_mh.multiply(&sub_mh);
+                }
                 Ok(Err(e)) => return Err(e),
                 Err(e) => {
                     return Err(anyhow::anyhow!(
@@ -408,9 +429,19 @@ fn push_utxo_flush_from_retire(
         // 320k ops) and its Arc<UTXO> references are no longer needed here — in_flight_insertions
         // already holds separate refs for the supplement path until note_utxo_flush_completed.
         drop(pkg);
+        // Pre-compute muhash for the durability batch in the retire loop (full rayon pool,
+        // no lock held). This mirrors the async-path change: muhash always computed here,
+        // never inside the commit thread.
+        let mut shutdown_local_mh = blvm_muhash::MuHash3072::new();
+        store.compute_package_muhash(&prepared, &mut shutdown_local_mh)?;
         let muhash_running = {
             let mut mh_guard = ibd_muhash.lock();
-            store.flush_prepared_package(&prepared, Some(&mut *mh_guard))?;
+            // Incorporate all async batches' sub-accumulators + this durability batch's hash.
+            *mh_guard = std::mem::take(&mut *mh_guard)
+                .multiply(&combined_sub_mh)
+                .multiply(&shutdown_local_mh);
+            // Commit the durability batch to RocksDB (muhash already computed above, skip it).
+            store.flush_prepared_package(&prepared, None)?;
             mh_guard.serialize_running_state()
         };
         // `commit_no_wal` leaves rows in the memtable until flush_cf — persist SST first so a
@@ -431,22 +462,29 @@ fn push_utxo_flush_from_retire(
         // and note_utxo_flush_completed CAN safely run pre-durability: they only affect
         // in-memory eviction policy, not on-disk state. If we crash before the next
         // durability boundary, soft autorepair detects the watermark gap and replays.
+        //
+        // MuHash computed IN the async thread (not in the retire loop):
+        // For delete ops, compute_package_muhash does one RocksDB point-read per deletion
+        // to fetch the UTXO for its preimage. At h=180k-380k (Satoshi Dice era) a 320k-op
+        // batch contains ~170k deletes × 0.13 ms each ≈ 22 seconds of I/O. Doing this in
+        // the retire loop (before spawning the thread) blocked the loop for 22s per flush,
+        // freezing `local_last_retired` and causing apparent 30-120s IBD stalls.
+        // Doing it inside the async thread keeps the retire loop free; up to `flush_limit`
+        // threads run concurrently so their disk reads overlap (SSD handles parallel IOPS).
+        // Each thread returns a local sub-accumulator; joined into ibd_muhash at flush_limit
+        // cap joins and at durability drains (same sub-accumulator contract as before).
+        let prepared = pkg.prepare_for_disk()?;
+        drop(pkg);
         let store_clone = Arc::clone(store);
-        let mh_acc = Arc::clone(ibd_muhash);
         q.push_back(std::thread::spawn(move || {
-            let prepared = pkg.prepare_for_disk()?;
-            // Drop the raw ops Vec immediately after serialization. The flush thread may
-            // block for milliseconds waiting on mh_acc (mutex contended by other flush
-            // threads); holding the ~18 MB ops Vec during that wait wastes RSS that the
-            // UTXO cache could otherwise use.
-            drop(pkg);
-            {
-                let mut mh_guard = mh_acc.lock();
-                store_clone.flush_prepared_package(&prepared, Some(&mut *mh_guard))?;
-            }
+            // Compute muhash in the async thread: concurrent with other threads and with
+            // retire loop processing. Retire loop is never blocked by this I/O.
+            let mut local_mh = blvm_muhash::MuHash3072::new();
+            store_clone.compute_package_muhash(&prepared, &mut local_mh)?;
+            store_clone.flush_prepared_package(&prepared, None)?;
             store_clone.release_protected_heights(&heights);
             store_clone.note_utxo_flush_completed(prepared.max_block_height);
-            Ok(())
+            Ok(local_mh)
         }));
         debug!(
             "[IBD_DEBUG] Block {}: async commit (batch_size={}, in_flight={}, n={})",
@@ -730,30 +768,6 @@ fn run_validation_worker_shared(
         // `in_flight_insertions` (until disk flush completes). `maybe_evict` checks all three.
         if let Ok(Some(ref delta)) = &result {
             store.worker_cache_put_protected(&delta.additions, height);
-            // Pending-ops backpressure: gate on actual entries in `pending_shards`, not on
-            // block-lag (which is meaningless early-chain — 150 ops/block — but devastating
-            // late-chain — 8 000 ops/block). At h=200 k on a 16 GiB host we observed 22.5 M
-            // pending ops (~4.6 GB) causing OOM. We yield first (cheap, 0–10 µs) and only
-            // sleep on extended overrun, so retire never starves and early-chain BPS is
-            // unaffected.
-            // Reload the cap on each backpressure check — the adaptive controller may
-            // have shrunk it (RSS pressure rising) or grown it (drain keeping up). Cap=0
-            // disables backpressure outright (only on hosts the controller has decided
-            // can absorb the full pipeline).
-            let cap = max_pending_ops.load(Ordering::Relaxed);
-            if cap > 0 {
-                let mut spins = 0u32;
-                // Re-load the cap inside the spin loop too, so a controller-driven grow
-                // can release the worker before it sleeps long.
-                while store.pending_len() > max_pending_ops.load(Ordering::Relaxed) {
-                    if spins < 8 {
-                        std::thread::yield_now();
-                    } else {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
-                    spins = spins.saturating_add(1);
-                }
-            }
             store.apply_utxo_delta(delta, height, &mut del_scratch, &mut add_scratch, true);
         }
         let _ = tx.send(ValidateResult {
@@ -763,17 +777,79 @@ fn run_validation_worker_shared(
             elapsed,
             view_build_ms,
         });
+        // Pending-ops backpressure: throttle BEFORE picking up the next job, never before
+        // sending the current ValidateResult.
+        //
+        // Placing the spin here (post-send) instead of pre-apply_utxo_delta is the critical
+        // correctness fix for the deadlock observed at h≈179k (2026-05-09):
+        //
+        //   Old order: cache_put → [SPIN] → apply_delta → tx.send
+        //   New order: cache_put → apply_delta → tx.send → [SPIN]
+        //
+        // With the old order, all workers could park before tx.send, so the validation loop
+        // got no ValidateResult, sent no retire work, and pending never drained — a true
+        // circular deadlock broken only by the 30s safety valve. With the new order workers
+        // always complete the block (apply + send), so retire always has work to drain from,
+        // and pending falls below cap within milliseconds. The safety valve below is kept as
+        // a last-resort guard against pathological RocksDB stalls, but should never trigger
+        // in normal operation.
+        //
+        // Overshoot: up to N_workers × max_block_ops past the cap before parking. On a 16 GiB
+        // host that is ≈12 × 5000 = 60k ops × ~300 B ≈ 18 MB — negligible.
+        let cap = max_pending_ops.load(Ordering::Relaxed);
+        if cap > 0 {
+            let mut spins = 0u32;
+            let spin_start = std::time::Instant::now();
+            const WORKER_SPIN_MAX: std::time::Duration = std::time::Duration::from_secs(60);
+            const WORKER_SPIN_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+            let mut last_log = spin_start;
+            loop {
+                let pending_now = store.pending_len();
+                let cap_now = max_pending_ops.load(Ordering::Relaxed);
+                if pending_now <= cap_now {
+                    break;
+                }
+                if spin_start.elapsed() >= WORKER_SPIN_MAX {
+                    warn!(
+                        "[IBD_BACKPRESSURE_RELEASE] worker waited {}s for pending to drain \
+                         (height={}, pending={}, cap={}) — retire wedged; proceeding",
+                        spin_start.elapsed().as_secs(),
+                        height,
+                        pending_now,
+                        cap_now
+                    );
+                    break;
+                }
+                if last_log.elapsed() >= WORKER_SPIN_LOG_EVERY {
+                    warn!(
+                        "[IBD_BACKPRESSURE] worker waiting for pending to drain before next job \
+                         (height={}, pending={}, cap={}, waited={}s)",
+                        height,
+                        pending_now,
+                        cap_now,
+                        spin_start.elapsed().as_secs()
+                    );
+                    last_log = std::time::Instant::now();
+                }
+                if spins < 8 {
+                    std::thread::yield_now();
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                spins = spins.saturating_add(1);
+            }
+        }
     }
 }
 
 /// Adapt `max_pending_ops` online based on RSS pressure and pending-log fill ratio.
 ///
-/// The static tier table (4M / 8M / 16M / 0) was a one-shot decision at IBD start; on
-/// real workloads the right cap depends on (a) what RSS the host is actually using right
-/// now (pressure climbs as the UTXO cache grows past h=200 k) and (b) whether retire is
-/// keeping up with validation (drain throughput is what backpressure exists to bound).
-/// Holding the static cap means: under pressure we OOM (cap too high), and under calm
-/// we throttle validation when retire could absorb more (cap too low).
+/// The nominal cap at IBD start comes from RAM tier defaults or `BLVM_IBD_MAX_PENDING_OPS`; it is
+/// only the **anchor**. On real workloads the right live cap depends on (a) what RSS the host is
+/// using now (pressure climbs as the UTXO cache grows past h≈200 k) and (b) whether retire keeps
+/// up with validation.
+/// Fixing the live cap at nominal alone breaks both ways: under pressure cap too high → OOM
+/// risk; under calm cap too low → unnecessary validation throttle although retire could absorb more.
 ///
 /// **Policy.**
 /// - `Emergency` → halve the cap (floor `nominal/16`, hard floor `100 k`). RSS is
@@ -1032,9 +1108,9 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
     // Async flush: block batches on std::thread (validation runs off tokio).
     let mut flush_handles: VecDeque<std::thread::JoinHandle<Result<()>>> = VecDeque::new();
-    let utxo_flush_handles = Arc::new(Mutex::new(
-        VecDeque::<std::thread::JoinHandle<Result<()>>>::new(),
-    ));
+    let utxo_flush_handles = Arc::new(Mutex::new(VecDeque::<
+        std::thread::JoinHandle<Result<blvm_muhash::MuHash3072>>,
+    >::new()));
     // Per-IBD-run counter shared across retire shards (kept at 1 by default; increments only
     // on each `push_utxo_flush_from_retire` call). Drives the durability batching schedule
     // documented on `push_utxo_flush_from_retire`.
@@ -1157,12 +1233,12 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // 8 000/block late), so a fixed block-lag cap is either useless or devastating depending on
     // height. Entries map directly to memory.
     //
-    // Defaults (override via BLVM_IBD_MAX_PENDING_OPS):
-    //   ≤16 GiB: 4 M  (~800 MB pending,  ~5% of RAM)
-    //   16–24 GiB: 8 M (~1.6 GB)
-    //   24–32 GiB: 16 M (~3.2 GB)
-    //   ≥32 GiB: unlimited (high-RAM hosts can absorb the full pipeline)
-    // Nominal cap = the historical static tier value. The adaptive controller treats
+    // Defaults without `BLVM_IBD_MAX_PENDING_OPS` (GiB from [`MemoryGuard::total_gb_rounded`]):
+    //   under 16 GiB: 1 M
+    //   16–23 GiB: 1.5 M
+    //   24–31 GiB: 3 M
+    //   ≥32 GiB: 0 (backpressure disabled for this knob)
+    // Nominal cap = tier default or env override. The adaptive controller treats
     // this as the **anchor**: pressure pushes the live cap below nominal, calm pushes it
     // back up, never higher than `1.1 × nominal` (a 10% buffer above the budgeted RAM
     // class to absorb transient bursts without letting workers run arbitrarily far ahead).
@@ -1170,21 +1246,39 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| {
-            let total_gb = (system_total_ram_mb + 512) / 1024;
+            let total_gb = MemoryGuard::total_gb_rounded(system_total_ram_mb);
             if total_gb >= 32 {
                 0
             } else if total_gb >= 24 {
-                16_000_000
+                3_000_000
             } else if total_gb >= 16 {
-                // 8 M ≈ 1.2 GB pending memory. Bumping to 12 M on 16 GiB hosts pushed
-                // resident set into swap (12 GB used + 2.5 GB swapped → page faults
-                // stalled the workers). Stay at 8 M; let the retire-side flush batching
-                // (see `retire_flush_batch_size`) absorb the SST-churn problem.
-                8_000_000
-            } else if total_gb >= 12 {
-                6_000_000
+                // 1.5M cap × ~300 B/entry ≈ 450 MB peak. Sized so the full pipeline (cache
+                // ≤1.1 GB + pending ≤450 MB + inflight ≤150 MB + RocksDB ≤700 MB + mimalloc
+                // retention) stays inside the 6.5 GB RSS budget on a 16 GiB host shared with
+                // a typical desktop workload (~5 GB).
+                //
+                // History — DO NOT lower further on 16 GiB hosts without retesting both ends:
+                //   8M → 1.5M (h≈195k OOM, in_flight_insertions leak compounded with cache):
+                //     fixed by the in_flight_insertions removal in `IbdUtxoStore::remove`.
+                //   1.5M → 600k (h≈187k swap-thrash hypothesis): WRONG. Smaller cap forced
+                //     retire into 1-block-at-a-time mode while a single backlog drain still
+                //     packaged ~660k ops (workers race to fill cap on every release). Each
+                //     drain still overflowed the 64 MB memtable, but now happened *every*
+                //     block instead of every 1.5M ops. Net effect: 1 block per 30 s vs the
+                //     ~3000 BPS we get with the cap doing its actual job.
+                //   1.5M → 0 (cap disabled): IBD ran at ~3000 BPS to h=201k, then validation
+                //     stalled on a download issue. With no cap, valres_rx + staged BTreeMap +
+                //     pending_blocks grew unbounded, anon-rss hit 10.6 GB, kernel OOM-killed
+                //     blvm. Cap is also a pipeline throttle, not just memory throttle.
+                //
+                // The safety valve in `run_validation_worker_shared` (30 s spin ceiling)
+                // protects us from an absolute deadlock if retire ever goes truly wedged
+                // (e.g. RocksDB compaction stall). A backpressure-release does temporarily
+                // overshoot the cap, but the next retire iteration drains it within seconds
+                // under normal pressure.
+                1_500_000
             } else {
-                4_000_000
+                1_000_000
             }
         });
     // Live cap that the validation workers read on every backpressure check. The retire
@@ -1197,7 +1291,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     if max_pending_ops_nominal > 0 {
         info!(
             "IBD: pending-ops backpressure active (max_pending_ops={}, adaptive: shrinks under \
-             RSS pressure, grows when drain keeps up; bounds [nominal/16, 2*nominal])",
+             RSS pressure; calm growth up to ~1.1× nominal, Emergency floor max(nominal/16, 100k) — \
+             see adapt_max_pending_ops_tick)",
             max_pending_ops_nominal
         );
     } else {
@@ -1355,7 +1450,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             let cpus = std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(4);
-            let total_gb = (system_total_ram_mb + 512) / 1024;
+            let total_gb = MemoryGuard::total_gb_rounded(system_total_ram_mb);
             if total_gb >= 32 {
                 cpus.saturating_sub(1).clamp(4, 24)
             } else if total_gb >= 24 {
@@ -1377,7 +1472,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // We run N workers but allow a **deeper** job queue than N: workers stay
     // saturated and out-of-order completions buffer in `pending_results` until the head retires.
     //
-    // Default = 4× workers (clamped to [n_workers, 64]). Each in-flight slot holds:
+    // Default = 32, clamped to [n_validate_workers, 64], then floored at n_validate_workers.
+    // Each in-flight slot holds:
     //   - one `Arc<Block>` (refcount bump)
     //   - the pre-fetched UTXO map for that block (~few hundred KB at h=300k)
     //   - one small Arc-clone snapshot (`spec_adds_snapshot`)
@@ -1429,6 +1525,100 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     drop(valres_tx); // workers hold all live Sender clones
                      // ────────────────────────────────────────────────────────────────────────
 
+    // ────────────────────────────────────────────────────────────────────────
+    // Watchdog: log full pipeline state if validation_height stops advancing.
+    //
+    // Without this, a wedged validation loop produces zero log output until the
+    // coordinator stall watchdog fires (and that only sees the download side).
+    // The pipeline can deadlock at any of: worker pending-ops spin, valres_rx.recv()
+    // (no result coming), block-flush handle.join(), retire pushing to RocksDB
+    // under stop-write throttling, etc. This watchdog observes the height atomic
+    // every 30 s and dumps the queue/cap/handle state when it sees a freeze, so
+    // the next post-mortem can pinpoint which stage is stuck instead of guessing.
+    let watchdog_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watchdog_handle = {
+        let validation_height = Arc::clone(&validation_height);
+        let store = Arc::clone(&ibd_store_v2_for_validation);
+        let max_pending_ops_w = Arc::clone(&max_pending_ops);
+        let staged_count_w = Arc::clone(&staged_count);
+        let utxo_flush_handles_w = Arc::clone(&utxo_flush_handles);
+        let staged_w = Arc::clone(&staged);
+        let shutdown = Arc::clone(&watchdog_shutdown);
+        let feeder_state_w = Arc::clone(&feeder_state);
+        std::thread::Builder::new()
+            .name("ibd-validation-watchdog".into())
+            .spawn(move || {
+                const POLL: std::time::Duration = std::time::Duration::from_secs(10);
+                const FREEZE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(30);
+                let mut last_height = validation_height.load(Ordering::Relaxed);
+                let mut last_change = std::time::Instant::now();
+                let mut last_log = std::time::Instant::now() - FREEZE_THRESHOLD;
+                while !shutdown.load(Ordering::Relaxed) {
+                    std::thread::sleep(POLL);
+                    let h = validation_height.load(Ordering::Relaxed);
+                    if h != last_height {
+                        last_height = h;
+                        last_change = std::time::Instant::now();
+                        continue;
+                    }
+                    if last_change.elapsed() < FREEZE_THRESHOLD {
+                        continue;
+                    }
+                    // Throttle to one snapshot per FREEZE_THRESHOLD even if poll is faster.
+                    if last_log.elapsed() < FREEZE_THRESHOLD {
+                        continue;
+                    }
+                    last_log = std::time::Instant::now();
+                    let pending = store.pending_len();
+                    let cap = max_pending_ops_w.load(Ordering::Relaxed);
+                    let staged_n = staged_count_w.load(Ordering::Relaxed);
+                    // Use try_lock to avoid watchdog deadlocking if these mutexes are held
+                    // by a thread stuck in the shutdown/flush path (which would cause the
+                    // watchdog to silently hang and never log the freeze diagnostic).
+                    let utxo_flushes = utxo_flush_handles_w
+                        .try_lock()
+                        .map(|g| g.len())
+                        .unwrap_or(usize::MAX);
+                    let cache = store.len();
+                    let inflight = store.in_flight_len();
+                    let staged_lo_hi = staged_w
+                        .try_lock()
+                        .map(|g| {
+                            let lo = g.keys().next().copied();
+                            let hi = g.keys().next_back().copied();
+                            (lo, hi, g.len())
+                        })
+                        .unwrap_or((None, None, usize::MAX));
+                    let feeder_buf_len = feeder_state_w
+                        .0
+                        .try_lock()
+                        .map(|g| g.0.len())
+                        .unwrap_or(usize::MAX);
+                    warn!(
+                        "[IBD_WATCHDOG] validation frozen at h={} for {}s — pending={}/{} staged_count={} \
+                         staged_btreemap=(lo={:?},hi={:?},len={}) feeder_buffer={} \
+                         utxo_flush_in_flight={} cache_entries={} inflight_insertions={} \
+                         (likely cause: workers parked on pending cap, retire wedged on RocksDB \
+                         flush_disk, block-flush handle saturated, or premature IBD break — \
+                         MAX values indicate mutex was contended/unavailable)",
+                        h,
+                        last_change.elapsed().as_secs(),
+                        pending,
+                        cap,
+                        staged_n,
+                        staged_lo_hi.0,
+                        staged_lo_hi.1,
+                        staged_lo_hi.2,
+                        feeder_buf_len,
+                        utxo_flushes,
+                        cache,
+                        inflight,
+                    );
+                }
+            })
+            .expect("spawn ibd-validation-watchdog")
+    };
+
     loop {
         // === DISPATCH PHASE: fill pipeline up to pipeline_depth_live ===
         // BIP30 adjacency guard: the two exceptional heights on mainnet (91722, 91842)
@@ -1441,20 +1631,31 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             n_pipeline_depth
         };
 
-        // Backpressure: when retire is stalling (e.g. during a durability flush_disk call,
-        // which takes 1–3 s at h>300k), staged accumulates one Arc<UtxoDelta> per completed
-        // block. Each entry holds ~700 KB of UTXO data at late heights; with validation at
-        // 500 BPS a 3-second stall would fill ~1500 entries = ~1 GB. Cap the backlog so the
-        // orchestrator pauses dispatch (letting workers drain current jobs) rather than
-        // flooding staged. The cap does NOT apply when in_flight is empty — that would
-        // deadlock if retire stalled before any work was dispatched.
-        let staged_dispatch_cap = (n_pipeline_depth * 3).max(64);
+        // Backpressure: when retire is stalling (e.g. during a durability flush_disk call),
+        // staged accumulates one Arc<UtxoDelta> per completed block. Each entry holds ~700 KB
+        // of UTXO data at late heights; with validation at 500 BPS a 3-second stall fills
+        // ~1500 entries ≈ 1 GB. Cap the backlog strictly so the orchestrator pauses dispatch
+        // rather than flooding staged.
+        //
+        // NO in_flight.is_empty() bypass here. The old bypass dispatched ONE block per
+        // iteration when staged >= cap and in_flight was empty. Because each dispatched block
+        // completes and re-inserts into staged, staged grew without bound when retire was
+        // stuck (observed: 32510 entries × 480 KB = 15+ GB → OOM at h≈214k). The bypass
+        // was originally added to prevent a premature `break` below; that is now handled
+        // by the break guard checking staged_count > 0 (see below).
+        //
+        // Cap sized so staged never becomes a major RSS consumer:
+        //   h=82k  : ~10 KB/entry  → 256 × 10 KB  = 2.6 MB  (negligible)
+        //   h=218k : ~480 KB/entry → 256 × 480 KB  = 123 MB  (safe)
+        //   h=600k : ~700 KB/entry → 256 × 700 KB  = 179 MB  (safe)
+        // 256 minimum (was 128): at h>270k staged_count was pegged at 158 > old cap=128,
+        // keeping the dispatcher paused while workers idled. With 256, dispatcher runs
+        // longer before pausing, reducing worker idle time during retire's drain cycles.
+        let staged_dispatch_cap = (n_pipeline_depth * 4).max(256);
         // Snapshot once per orchestrator iteration (Relaxed load, ~1 atomic read per loop).
         let staged_now = staged_count.load(Ordering::Relaxed);
 
-        while in_flight.len() < pipeline_depth_live
-            && (in_flight.is_empty() || staged_now < staged_dispatch_cap)
-        {
+        while in_flight.len() < pipeline_depth_live && staged_now < staged_dispatch_cap {
             let is_first = in_flight.is_empty();
 
             // Get next block: blocking if no in-flight work, non-blocking otherwise.
@@ -1702,9 +1903,38 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             next_validation_height = h + 1;
         } // end dispatch while
 
-        // Terminate when feeder is exhausted and the pipeline is empty.
+        // Terminate when feeder is exhausted, the validation pipeline is empty, AND the
+        // retire thread has processed all staged blocks. Checking staged_count prevents:
+        //
+        // (a) Premature break: old code exited whenever in_flight was empty, even if staged
+        //     had thousands of unretired blocks (causing corrupted UTXO state or missed work).
+        //     This was the original motivation for the in_flight.is_empty() bypass in the
+        //     dispatch while loop above — that bypass is now removed since we wait here.
+        //
+        // (b) OOM via bypass: the bypass dispatched 1 block per iteration when staged >= cap
+        //     and in_flight was empty, growing staged unboundedly while retire was stuck
+        //     (observed: 32510 entries × 480 KB = 15+ GB → OOM at h≈214k on 16 GiB hosts).
+        //
+        // When in_flight = 0 but staged > 0: retire is still processing. Sleep 10 ms to
+        // avoid a busy spin, then re-enter the dispatch loop. When both are zero, IBD done.
         if in_flight.is_empty() {
-            break;
+            let staged_remaining = staged_count.load(Ordering::Relaxed);
+            if staged_remaining == 0 {
+                break;
+            }
+            // Retire still has work. Yield CPU briefly, then re-check.
+            // Also bail out if retire errored (it won't drain staged, so we'd spin forever).
+            if retire_err.lock().is_some() {
+                return match retire_thread_shutdown(&mut _retire_dispatcher, &retire_err) {
+                    Ok(()) => Err(anyhow::anyhow!(
+                        "IBD retire thread failed while waiting for staged drain (staged_remaining={})",
+                        staged_remaining
+                    )),
+                    Err(e) => Err(e),
+                };
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            continue;
         }
 
         // === COLLECT PHASE: wait for the next in-order result ===
@@ -1796,9 +2026,11 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             if vres.height == 91855 {
                 bip30_index.clear();
                 bip30_index.shrink_to_fit();
-                info!("[IBD] BIP30 exceptional range complete at h=91855 — cleared BIP30 index \
+                info!(
+                    "[IBD] BIP30 exceptional range complete at h=91855 — cleared BIP30 index \
                        (eliminates per-dispatch clone cost for remaining ~{}k blocks)",
-                    (700_000u64.saturating_sub(91855)) / 1000);
+                    (700_000u64.saturating_sub(91855)) / 1000
+                );
             }
         }
         let validation_time = vres.elapsed;
@@ -2425,38 +2657,55 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     retire_thread_shutdown(&mut _retire_dispatcher, &retire_err)?;
 
     // Final UTXO flush: drain remaining pending ops, then join all in-flight handles.
+    // Collect sub-MuHash accumulators from all async threads (they ran without the global
+    // mh_acc mutex) and fold them into the global accumulator before persisting the final
+    // checkpoint.
+    let mut shutdown_pkg_height: Option<u64> = None;
     if let Some(pkg) = ibd_store_v2_for_validation.take_remaining_flush_package() {
-        let store_clone = Arc::clone(&ibd_store_v2_for_validation);
-        let storage_shutdown = Arc::clone(&storage_clone);
-        let mh_shutdown = Arc::clone(&ibd_muhash_accumulator);
+        shutdown_pkg_height = Some(pkg.max_block_height);
         let heights = Arc::clone(&pkg.heights);
+        // Pre-compute muhash in the main thread (full rayon pool) before spawning commit thread.
+        let prepared = pkg.prepare_for_disk()?;
+        drop(pkg);
+        let mut local_mh = blvm_muhash::MuHash3072::new();
+        ibd_store_v2_for_validation.compute_package_muhash(&prepared, &mut local_mh)?;
+        let store_clone = Arc::clone(&ibd_store_v2_for_validation);
         utxo_flush_handles
             .lock()
             .push_back(std::thread::spawn(move || {
-                let prepared = pkg.prepare_for_disk()?;
-                let muhash_running = {
-                    let mut mh_guard = mh_shutdown.lock();
-                    store_clone.flush_prepared_package(&prepared, Some(&mut *mh_guard))?;
-                    mh_guard.serialize_running_state()
-                };
-                store_clone.flush_disk()?;
-                storage_shutdown.chain().persist_ibd_utxo_flush_checkpoint(
-                    prepared.max_block_height,
-                    &muhash_running,
-                )?;
+                store_clone.flush_prepared_package(&prepared, None)?;
                 store_clone.release_protected_heights(&heights);
                 store_clone.note_utxo_flush_completed(prepared.max_block_height);
-                Ok(())
+                Ok(local_mh)
             }));
     }
+    // Drain all handles, collecting each thread's local MuHash sub-accumulator.
+    let mut combined_shutdown_sub_mh = blvm_muhash::MuHash3072::new();
     for handle in utxo_flush_handles.lock().drain(..) {
         match handle.join() {
-            Ok(Ok(())) => {}
+            Ok(Ok(sub_mh)) => {
+                combined_shutdown_sub_mh = combined_shutdown_sub_mh.multiply(&sub_mh);
+            }
             Ok(Err(e)) => return Err(e),
             Err(e) => {
                 return Err(anyhow::anyhow!("UTXO flush panicked at shutdown: {:?}", e));
             }
         }
+    }
+    // Fold all async threads' sub-accumulators into the global (multiply by identity is a no-op
+    // so this is safe whether or not any handles had real muhash work to contribute).
+    {
+        let mut mh_guard = ibd_muhash_accumulator.lock();
+        *mh_guard = std::mem::take(&mut *mh_guard).multiply(&combined_shutdown_sub_mh);
+    }
+    // Persist the final checkpoint only when there was a remaining flush package (the flush_disk
+    // + persist_checkpoint pair ensures the watermark advances past the last UTXO batch).
+    if let Some(max_height) = shutdown_pkg_height {
+        let muhash_running = ibd_muhash_accumulator.lock().serialize_running_state();
+        ibd_store_v2_for_validation.flush_disk()?;
+        storage_clone
+            .chain()
+            .persist_ibd_utxo_flush_checkpoint(max_height, &muhash_running)?;
     }
     let last_validated = next_validation_height.saturating_sub(1);
     if let Err(e) = ibd_store_v2_for_validation.flush_disk() {
@@ -2493,6 +2742,12 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // `push_utxo_flush_from_retire`). Bumping from tip caused resume at height H with an empty or
     // partial `ibd_utxos` tree → immediate `UTXO not found for input`.
 
+    // Signal the watchdog to exit so the validation thread joins cleanly on success. Early-return
+    // (error) paths skip this and let the watchdog die when the process exits — fine because the
+    // watchdog only logs and holds no resources besides Arc clones.
+    watchdog_shutdown.store(true, Ordering::Relaxed);
+    let _ = watchdog_handle.join();
+
     Ok(())
 }
 
@@ -2520,7 +2775,7 @@ fn run_ibd_retire_loop_with_commitment(
     ibd_defer_flush: bool,
     ibd_defer_checkpoint: u64,
     max_utxo_flushes_under_pressure: usize,
-    utxo_flush_handles: Arc<Mutex<VecDeque<JoinHandle<Result<()>>>>>,
+    utxo_flush_handles: Arc<Mutex<VecDeque<JoinHandle<Result<blvm_muhash::MuHash3072>>>>>,
     retire_flush_counter: Arc<AtomicUsize>,
     retire_err: Arc<Mutex<Option<anyhow::Error>>>,
     blockstore: Arc<BlockStore>,
@@ -2711,7 +2966,7 @@ fn run_ibd_retire_loop_no_commitment(
     ibd_defer_flush: bool,
     ibd_defer_checkpoint: u64,
     max_utxo_flushes_under_pressure: usize,
-    utxo_flush_handles: Arc<Mutex<VecDeque<JoinHandle<Result<()>>>>>,
+    utxo_flush_handles: Arc<Mutex<VecDeque<JoinHandle<Result<blvm_muhash::MuHash3072>>>>>,
     retire_flush_counter: Arc<AtomicUsize>,
     retire_err: Arc<Mutex<Option<anyhow::Error>>>,
     ibd_muhash: Arc<Mutex<blvm_muhash::MuHash3072>>,
@@ -2903,15 +3158,20 @@ mod tests {
         assert_eq!(cap.load(Ordering::Relaxed), 8_000_000);
     }
 
-    /// `None` + low pending → grow by ~10%, never above `2 * nominal`.
+    /// `None` + low pending → grow by ~10%, capped at `1.1 × nominal` (integer ×11/10).
     #[test]
     fn adapt_none_grows_when_drain_keeps_up() {
-        let cap = fresh_cap(8_000_000);
+        let nominal = 8_000_000;
+        let cap = fresh_cap(nominal);
         let last = fresh_last_adapt_zero();
-        adapt_max_pending_ops_tick(&cap, 8_000_000, PressureLevel::None, 100_000, &last);
+        adapt_max_pending_ops_tick(&cap, nominal, PressureLevel::None, 100_000, &last);
         let new = cap.load(Ordering::Relaxed);
-        assert!(new > 8_000_000, "None + drain-ahead must grow cap");
-        assert!(new <= 16_000_000, "Must respect 2*nominal cap");
+        assert!(new > nominal, "None + drain-ahead must grow cap");
+        let ceiling = nominal.saturating_mul(11).saturating_div(10);
+        assert!(
+            new <= ceiling,
+            "Must respect 1.1× nominal ceiling (got {new}, ceiling {ceiling})"
+        );
     }
 
     /// `None` + high pending → hold (no point growing if validator is racing ahead).

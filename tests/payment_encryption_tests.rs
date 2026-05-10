@@ -2,6 +2,8 @@
 //!
 //! Tests the automatic encryption of modules when payments are processed.
 
+mod common;
+
 use blvm_node::config::PaymentConfig;
 use blvm_node::module::encryption::{load_encrypted_module, ModuleEncryption};
 use blvm_node::module::registry::client::{ModuleEntry, ModuleRegistry};
@@ -9,7 +11,6 @@ use blvm_node::module::registry::manifest::{ModuleManifest, PaymentSection};
 use blvm_node::payment::processor::{PaymentError, PaymentProcessor};
 use blvm_protocol::address::{BitcoinAddress, Network};
 use blvm_protocol::payment::{Payment, PaymentRequest};
-use secp256k1::{Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,19 +27,14 @@ fn create_test_manifest_with_payment(name: &str) -> ModuleManifest {
     use blvm_node::module::registry::manifest::{MaintainerSignature, SignatureSection};
 
     // Create payment signature
-    let secp = Secp256k1::new();
-    let test_key = SecretKey::from_slice(&[1; 32]).unwrap();
+    let test_key = common::test_secp256k1_scalar_one();
     let (author_addr, commons_addr) = test_payment_tb1_addresses();
     let price_sats = 100000u64;
 
     let message_data = format!("{}||{}||{}", author_addr, commons_addr, price_sats);
-    let message_hash = Sha256::digest(message_data.as_bytes());
-    let message = secp256k1::Message::from_digest_slice(&message_hash).unwrap();
-    let signature = secp.sign_ecdsa(&message, &test_key);
-    let signature_hex = hex::encode(signature.serialize_compact());
-
-    let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &test_key);
-    let pubkey_hex = hex::encode(pubkey.serialize());
+    let message_hash: [u8; 32] = Sha256::digest(message_data.as_bytes()).into();
+    let (signature_hex, pubkey_hex) =
+        common::ecdsa_compact_sig_hex_and_pubkey_hex(&test_key, &message_hash);
 
     let signature_section = SignatureSection {
         maintainers: vec![MaintainerSignature {

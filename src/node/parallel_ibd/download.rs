@@ -3,6 +3,7 @@
 //! Downloads blocks from a peer using pipelined GetData requests.
 //! Core-style: max 16 blocks in flight per peer across all workers.
 
+use super::types::{SharedBlock, SharedWitnesses};
 use crate::network::inventory::{MSG_BLOCK, MSG_WITNESS_BLOCK};
 use crate::network::protocol::{GetDataMessage, InventoryVector, ProtocolMessage, ProtocolParser};
 use crate::network::NetworkManager;
@@ -10,7 +11,6 @@ use crate::storage::blockstore::BlockStore;
 use anyhow::{Context, Result};
 use blvm_protocol::features::FeatureRegistry;
 use blvm_protocol::{segwit::Witness, Block, Hash, ProtocolVersion};
-use super::types::{SharedBlock, SharedWitnesses};
 use futures::stream::{FuturesUnordered, StreamExt};
 use hex;
 use std::collections::BTreeMap;

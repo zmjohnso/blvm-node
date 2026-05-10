@@ -1,13 +1,13 @@
-//! Tests for BIP70 payment verification and signing
+//! Tests for BIP70 payment verification and signing.
+//!
+//! Payment transaction bytes use **bincode** to match `verify_payment_transactions`
+//! in blvm-protocol (not Bitcoin wire `serialize_transaction`).
 
 use blvm_node::network::protocol::PaymentMessage;
 use blvm_protocol::payment::{Payment, PaymentOutput, PaymentProtocolServer, PaymentRequest};
-use blvm_protocol::serialization::transaction::serialize_transaction;
 use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput};
-use secp256k1::{Secp256k1, SecretKey};
 
 #[test]
-#[ignore] // BIP70 module not yet implemented
 fn test_payment_verification() {
     // Create a payment request
     let output = PaymentOutput {
@@ -35,7 +35,8 @@ fn test_payment_verification() {
         lock_time: 0,
     };
 
-    let tx_bytes = serialize_transaction(&tx);
+    let tx_bytes = bincode::serialize(&tx)
+        .expect("bincode tx for BIP70 must match deserialize in verify_payment_transactions");
 
     let payment = Payment::new(vec![tx_bytes]);
 
@@ -59,24 +60,30 @@ fn test_payment_verification() {
 }
 
 #[test]
-#[ignore] // BIP70 module not yet implemented
 fn test_payment_ack_signing() {
-    let secp = Secp256k1::new();
-    let merchant_key = SecretKey::from_slice(&[1; 32]).unwrap();
+    // Scalar 1 — valid secret; pubkey derivation + ECDSA live in blvm-protocol via blvm-secp256k1.
+    let mut merchant_key = [0u8; 32];
+    merchant_key[31] = 1;
 
-    // Create payment request with merchant pubkey
     let output = PaymentOutput {
         script: vec![0x51],
         amount: Some(1000),
     };
 
-    let mut payment_request = PaymentRequest::new("main".to_string(), vec![output], 1234567890);
+    let mut payment_request = PaymentRequest::new("main".to_string(), vec![output], 1_234_567_890);
+    payment_request
+        .sign(&merchant_key)
+        .expect("sign payment request (sets merchant_pubkey + blvm-secp256k1 signature)");
+    payment_request
+        .verify_signature()
+        .expect("payment request signature must verify");
 
-    // Set merchant pubkey
-    let merchant_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &merchant_key);
-    payment_request.merchant_pubkey = Some(merchant_pubkey.serialize().to_vec());
+    let merchant_pubkey = payment_request
+        .merchant_pubkey
+        .as_ref()
+        .expect("sign() sets merchant_pubkey")
+        .as_slice();
 
-    // Create payment
     let tx = Transaction {
         version: 1,
         inputs: blvm_protocol::tx_inputs![TransactionInput {
@@ -94,7 +101,8 @@ fn test_payment_ack_signing() {
         lock_time: 0,
     };
 
-    let tx_bytes = serialize_transaction(&tx);
+    let tx_bytes = bincode::serialize(&tx)
+        .expect("bincode tx for BIP70 must match deserialize in verify_payment_transactions");
     let payment = Payment::new(vec![tx_bytes]);
 
     let payment_msg = PaymentMessage {
@@ -103,17 +111,16 @@ fn test_payment_ack_signing() {
         customer_signature: None,
     };
 
-    // Process payment with merchant key
-    // Note: process_payment expects &Payment, not &PaymentMessage
     let result = PaymentProtocolServer::process_payment(
         &payment_msg.payment,
         &payment_request,
         Some(&merchant_key),
     );
-
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "{:?}", result.err());
     let ack = result.unwrap();
 
-    // Verify payment ACK structure (PaymentACK doesn't have merchant_signature field)
+    ack.verify_signature(merchant_pubkey)
+        .expect("PaymentACK merchant signature must verify");
+
     assert!(ack.memo.is_some());
 }

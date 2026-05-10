@@ -1292,30 +1292,10 @@ pub mod rocksdb_impl {
             opts.create_if_missing(true);
             opts.create_missing_column_families(true);
 
-            // Detect system RAM first so every tunable below can scale with it.
-            // /proc/meminfo gives kB; round to nearest GB.
-            let total_ram_gb: u64 = {
-                #[cfg(target_os = "linux")]
-                {
-                    std::fs::read_to_string("/proc/meminfo")
-                        .ok()
-                        .and_then(|s| {
-                            s.lines()
-                                .find(|l| l.starts_with("MemTotal:"))
-                                .and_then(|l| l.split_whitespace().nth(1))
-                                .and_then(|v| v.parse::<u64>().ok())
-                        })
-                        .map(|kb| (kb / 1024 + 512) / 1024)
-                        .unwrap_or(16)
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    std::env::var("BLVM_RAM_GB")
-                        .ok()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(16)
-                }
-            };
+            // Align with MemoryGuard total_mb probing + [`crate::utils::ram_tier::total_gb_rounded`].
+            let total_ram_gb: u64 = crate::utils::ram_tier::total_gb_rounded(
+                crate::utils::ram_tier::probe_total_ram_mib(),
+            );
 
             let default_parallelism = std::thread::available_parallelism()
                 .map(|p| p.get() as i32)
@@ -1488,22 +1468,26 @@ pub mod rocksdb_impl {
             // WriteBufferManager: hard cap on total memtable memory across ALL CFs.
             // allow_stall=true blocks writes instead of exceeding the cap.
             //
-            // 16 GB tier sized for the `ibd_utxos` memtables (write_buffer=96 MB,
-            // max_write_buffer_number=3 → up to 288 MB peak for ibd_utxos) plus the
-            // persistent `utxos` CF (~128 MB peak) plus bulk CFs. 512 MB total leaves
-            // room without pushing process RSS into swap territory.
-            let wbm_mb: usize = if total_ram_gb >= 32 {
-                1280
-            } else if total_ram_gb >= 24 {
-                896
-            } else if total_ram_gb >= 16 {
-                // Reduced from 512 MB: with smaller write_buffer (64 MB × 2 = 128 MB peak for
-                // ibd_utxos) plus the persistent utxos CF (~128 MB peak), 256 MB WBM cap leaves
-                // adequate headroom while freeing 256 MB of RSS budget vs the old 512 MB setting.
-                256
-            } else {
-                48
-            };
+            // Sizing: must cover all CFs at their peak concurrent memtable usage.
+            // Bulk CFs (blocks/headers/witnesses) each have write_buffer=64MB×6=384MB max.
+            // ibd_utxos: write_buffer=64MB×2=128MB. utxos: 64MB×2=128MB.
+            // In practice only 1-2 immutable memtables active per CF during steady IBD,
+            // but bursts can spike all CFs simultaneously. 1024MB on 16GB gives headroom
+            // without pushing into OOM territory (leaves >14GB for UTXO cache + OS).
+            let wbm_mb: usize = std::env::var("BLVM_ROCKSDB_WBM_MB")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or({
+                    if total_ram_gb >= 32 {
+                        2048
+                    } else if total_ram_gb >= 24 {
+                        1536
+                    } else if total_ram_gb >= 16 {
+                        1024
+                    } else {
+                        256
+                    }
+                });
             let wbm =
                 rocksdb::WriteBufferManager::new_write_buffer_manager(wbm_mb * 1024 * 1024, true);
             opts.set_write_buffer_manager(&wbm);
@@ -1607,32 +1591,56 @@ pub mod rocksdb_impl {
             let make_ibd_utxo_cf_opts = |uc: &Cache| -> Options {
                 let mut o = Options::default();
                 let mut bbo = BlockBasedOptions::default();
-                // No bloom filter: with l0_trigger=16, pinning cost is 16 × ~12MB = 192MB.
-                // On 16 GB hosts with RSS already near the adaptive cap threshold at h=400k+,
-                // any additional RSS (bloom filter RAM) triggers DashMap shrinks that worsen
-                // disk read rates more than bloom filters help. Keep off until we have more RAM.
+                // Bloom filter (10 bits/key, whole-key mode): at h=230k+ blocks have 200+ tx
+                // and the prefetcher makes 100-200 RocksDB reads per block. Without bloom filters
+                // each read must binary-search all L0 SST files (up to 16) → 160μs/lookup.
+                // With bloom filters (in-memory): each L0 file check is ~200ns, reducing
+                // effective latency to ~5μs/lookup and giving ~30× prefetch speedup.
+                // RAM cost: l0_trigger(16) × ~12MB/filter = ~192MB; safe when UTXO cache is
+                // hard-capped (no DashMap shrink risk) and we have >2 GB RSS headroom.
+                bbo.set_bloom_filter(10.0, false);
                 bbo.set_block_cache(uc);
-                // No index/filter pinning: with no bloom filters there is nothing to pin,
-                // and the data block cache is sized to handle IBD read traffic adequately.
+                // Pin bloom filters and index blocks in block cache to avoid re-reading them
+                // on every L0 file check (critical for the 16-file L0 case).
+                bbo.set_pin_l0_filter_and_index_blocks_in_cache(true);
                 o.set_block_based_table_factory(&bbo);
-                let wb = if total_ram_gb >= 32 {
-                    256
-                } else if total_ram_gb >= 24 {
-                    128
-                } else if total_ram_gb >= 16 {
-                    // 64 MB × 2 = 128 MB peak. The earlier bump to 192 × 3 = 576 MB pushed
-                    // 16 GB hosts into swap (RSS hit ~12 GB at h~200k → 2.5 GB swap → page
-                    // faults stalled validation workers, BPS dropped from 700 → 100). The
-                    // micro-SST/L0 churn that motivated the bump is now solved at the
-                    // application layer by the retire-side flush batching (see
-                    // `retire_flush_batch_size` in validation_loop.rs) which makes each
-                    // physical flush 8× larger on the same memtable budget.
-                    64
-                } else {
-                    8
-                };
+                let wb = std::env::var("BLVM_ROCKSDB_IBD_WB_MB")
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or({
+                        if total_ram_gb >= 32 {
+                            256
+                        } else if total_ram_gb >= 24 {
+                            128
+                        } else if total_ram_gb >= 16 {
+                            // 64 MB × 2 = 128 MB peak. Increase via BLVM_ROCKSDB_IBD_WB_MB if
+                            // flush concurrency (utxo_flush_handles in-flight) causes write stalls.
+                            64
+                        } else {
+                            8
+                        }
+                    });
+                // max_write_buffer_number must be large enough to hold all in-flight async
+                // commit_no_wal batches without stalling. We allow max_utxo_flushes_auto
+                // (8 on 16 GB) async threads concurrently; each writes ~19 MB. With the
+                // old default of 2 (2×64MB=128MB), the 8th async commit stalled waiting
+                // for background flush — causing the retire loop to block during durability
+                // drain and workers to park on pending cap for 5-40s. Set default to 10
+                // (10×64MB=640MB on 16 GB) to absorb all in-flight commits without stalling.
+                let max_wbn = std::env::var("BLVM_ROCKSDB_IBD_MAX_WB_NUM")
+                    .ok()
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .unwrap_or({
+                        if total_ram_gb >= 32 {
+                            12
+                        } else if total_ram_gb >= 16 {
+                            10
+                        } else {
+                            4
+                        }
+                    });
                 o.set_write_buffer_size(wb * 1024 * 1024);
-                o.set_max_write_buffer_number(2);
+                o.set_max_write_buffer_number(max_wbn);
                 o.set_min_write_buffer_number_to_merge(1);
                 // L0 trigger: tunes how many L0 SSTs accumulate before compaction kicks in.
                 // 16 GB host default raised 16 → 32 because the previous setting (slowdown=64,
@@ -1682,13 +1690,18 @@ pub mod rocksdb_impl {
                 bbo.set_cache_index_and_filter_blocks(true);
                 o.set_block_based_table_factory(&bbo);
                 let wb = if total_ram_gb >= 32 {
-                    64
+                    128
                 } else if total_ram_gb >= 16 {
-                    32
+                    64
                 } else {
-                    4
+                    16
                 };
                 o.set_write_buffer_size(wb * 1024 * 1024);
+                // Increase from default (2) to 6: allows up to 5 immutable memtables before
+                // writes stall. The [blocks] CF was stopping writes every ~30s during IBD at
+                // h~170-190k because block data filled both memtables before the background
+                // flush could complete. 6 buffers give the flusher plenty of headroom.
+                o.set_max_write_buffer_number(6);
                 o.set_level_zero_file_num_compaction_trigger(12);
                 o.set_compression_type(rocksdb::DBCompressionType::Zstd);
                 o.set_bottommost_compression_type(rocksdb::DBCompressionType::Zstd);

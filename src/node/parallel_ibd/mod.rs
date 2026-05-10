@@ -37,7 +37,9 @@ use feeder::{new_feeder_state, run_feeder_thread};
 use memory::{MemoryGuard, TIDESDB_MAX_TXN_OPS};
 #[cfg(feature = "production")]
 use types::PrefetchWorkItemV2;
-use types::{estimate_block_bytes, ChunkWorkItem, FeederBufferValue, ReadyItem, SharedBlock, SharedWitnesses};
+use types::{
+    estimate_block_bytes, ChunkWorkItem, FeederBufferValue, ReadyItem, SharedBlock, SharedWitnesses,
+};
 
 use crate::network::peer_scoring::is_lan_peer;
 use crate::network::protocol::{
@@ -613,8 +615,10 @@ impl ParallelIBD {
                 256
             };
             let raw = base.max(parallel).clamp(floor, 8192);
+            // Cap blocks buffered on the bounded tokio queue (≠ `MemoryGuard::max_ahead_blocks` /
+            // `tier_max_download_ahead_blocks`, which throttle download prefetch). Two separate knobs.
             let ram_ceiling = match mem_guard.system_total_ram_mb() {
-                // ≤~18 GiB physical — worst‑case queued blocks RAM (aligned with MemoryGuard tiers).
+                // ≤~18 GiB physical — keep worst‑case queued full blocks bounded on tight hosts.
                 m if m <= memory::MemoryGuard::EXTENDED_SIXTEEN_CLASS_MB => 1024,
                 m if m <= 32 * 1024 => 4096,
                 _ => 8192,
@@ -630,7 +634,9 @@ impl ParallelIBD {
             }
         };
         let (block_tx, mut block_rx) =
-            tokio::sync::mpsc::channel::<(u64, SharedBlock, SharedWitnesses)>(download_block_queue_cap);
+            tokio::sync::mpsc::channel::<(u64, SharedBlock, SharedWitnesses)>(
+                download_block_queue_cap,
+            );
         info!(
             "IBD: download→coordinator channel capacity={} blocks (buffer_limit={}, workers={}, bounded + RAM/env valve)",
             download_block_queue_cap,
@@ -1056,8 +1062,10 @@ impl ParallelIBD {
         let feeder_state = new_feeder_state();
         let feeder_state_for_coord = Arc::clone(&feeder_state);
         tokio::spawn(async move {
-            let mut reorder_buffer: std::collections::BTreeMap<u64, (SharedBlock, SharedWitnesses)> =
-                std::collections::BTreeMap::new();
+            let mut reorder_buffer: std::collections::BTreeMap<
+                u64,
+                (SharedBlock, SharedWitnesses),
+            > = std::collections::BTreeMap::new();
             let mut next_prefetch_height = start_height;
             let mut total_received = 0u64;
             const BATCH_DRAIN_LIMIT: usize = 2000; // 10K BPS: larger batches reduce recv overhead
@@ -1100,7 +1108,11 @@ impl ParallelIBD {
                 });
             };
             info!("Coordinator: started, awaiting blocks from download workers");
-            const COORD_STALL_LOG_SECS: u64 = 30;
+            // 90s: the LAN peer (Bitcoin Core) needs 40-80s to serve dense Satoshi Dice era
+            // chunks from disk (h=285k-310k). With 30s, every chunk triggered a stall+retry
+            // cycle causing ~3 retries/min and driving BPS down to 2-3. With 90s, those chunks
+            // complete naturally and IBD runs at 50-100 BPS through the dense zone.
+            const COORD_STALL_LOG_SECS: u64 = 90;
             let mut coord_buffer_full_since: Option<std::time::Instant> = None;
             #[cfg(target_os = "linux")]
             let mut coord_emergency_log = std::time::Instant::now();
@@ -1133,7 +1145,7 @@ impl ParallelIBD {
                             .remove(&next_prefetch_height)
                             .expect("contains_key");
                         block_input_keys_and_tx_ids_filtered(
-                            &*block,
+                            &block,
                             &mut coord_tx_ids_buf,
                             &mut coord_keys_buf,
                         );
@@ -1225,19 +1237,33 @@ impl ParallelIBD {
                     Ok(n) => n,
                     Err(_) => {
                         let next_needed = validation_height_for_coord.load(Ordering::Relaxed) + 1;
-                        // next_needed is the height validation is waiting for, but the coordinator
-                        // may have already advanced next_prefetch_height well past it (blocks are
-                        // in the prefetch pipeline, just not yet validated). Requeuing the old
-                        // height floods block_rx with duplicate blocks that can never advance
-                        // next_prefetch_height, filling reorder_buffer and causing a livelock.
-                        // Always requeue what the coordinator actually needs from download workers.
-                        let stall_height = next_prefetch_height.max(next_needed);
+                        // next_prefetch_height is the coordinator's delivery cursor. Requeue the
+                        // chunk it is waiting on to unblock the download pipeline.
+                        // Additionally: if validation is stuck at a height below next_prefetch_height
+                        // and that block is NOT already in the reorder_buffer, its download chunk
+                        // partially failed. Requeue that chunk explicitly so the missing block is
+                        // re-downloaded. Without this fix the coordinator keeps requeuing chunks
+                        // ahead of the gap, leaving the missing block unreachable indefinitely.
+                        let stall_height = next_prefetch_height;
                         warn!(
                             "Coordinator stall: no blocks for {}s, waiting for height {} (total_received={}, next_prefetch={}, stall_requeue={})",
                             COORD_STALL_LOG_SECS, next_needed, total_received, next_prefetch_height, stall_height
                         );
                         let _ = stall_tx_for_coord.send(stall_height);
                         assigner_for_coord.requeue_chunk_containing_height(stall_height);
+                        // If the height validation needs is missing from the reorder_buffer,
+                        // re-request its chunk (it may have partially failed mid-download).
+                        if next_needed < next_prefetch_height
+                            && !reorder_buffer.contains_key(&next_needed)
+                        {
+                            warn!(
+                                "Coordinator stall: height {} missing from reorder_buffer \
+                                 (size={}) — requeuing its chunk for re-download",
+                                next_needed,
+                                reorder_buffer.len()
+                            );
+                            assigner_for_coord.requeue_chunk_containing_height(next_needed);
+                        }
                         continue;
                     }
                 };
@@ -1252,7 +1278,7 @@ impl ParallelIBD {
                             .remove(&next_prefetch_height)
                             .expect("contains_key");
                         block_input_keys_and_tx_ids_filtered(
-                            &*block,
+                            &block,
                             &mut coord_tx_ids_buf,
                             &mut coord_keys_buf,
                         );
@@ -1311,7 +1337,7 @@ impl ParallelIBD {
                         // list to MultiGet — sending an empty `keys` would force the validation
                         // worker to re-derive them and fall through to a synchronous disk load.
                         block_input_keys_and_tx_ids_filtered(
-                            &*block,
+                            &block,
                             &mut coord_tx_ids_buf,
                             &mut coord_keys_buf,
                         );
@@ -1359,7 +1385,7 @@ impl ParallelIBD {
                             .remove(&next_prefetch_height)
                             .expect("contains_key");
                         block_input_keys_and_tx_ids_filtered(
-                            &*block,
+                            &block,
                             &mut coord_tx_ids_buf,
                             &mut coord_keys_buf,
                         );
@@ -1972,9 +1998,8 @@ impl ParallelIBD {
                             if let Some(cached) = get_cached_serialized_header(block_hash) {
                                 return Ok(cached);
                             }
-                            let serialized = bincode::serialize(&block.header).map_err(|e| {
-                                anyhow::anyhow!("Header serialization failed: {e}")
-                            })?;
+                            let serialized = bincode::serialize(&block.header)
+                                .map_err(|e| anyhow::anyhow!("Header serialization failed: {e}"))?;
                             cache_serialized_header(*block_hash, serialized.clone());
                             Ok(Arc::new(serialized))
                         })
@@ -2008,9 +2033,8 @@ impl ParallelIBD {
                             if let Some(cached) = get_cached_serialized_header(block_hash) {
                                 return Ok(cached);
                             }
-                            let serialized = bincode::serialize(&block.header).map_err(|e| {
-                                anyhow::anyhow!("Header serialization failed: {e}")
-                            })?;
+                            let serialized = bincode::serialize(&block.header)
+                                .map_err(|e| anyhow::anyhow!("Header serialization failed: {e}"))?;
                             cache_serialized_header(*block_hash, serialized.clone());
                             Ok(Arc::new(serialized))
                         })
@@ -2054,11 +2078,10 @@ impl ParallelIBD {
                         for i in 0..chunk.len() {
                             let witnesses = &chunk[i].1;
                             if block_has_witness_data(witnesses) {
-                                v[i] = Some(
-                                    bincode::serialize(witnesses.as_ref()).map_err(|e| {
+                                v[i] =
+                                    Some(bincode::serialize(witnesses.as_ref()).map_err(|e| {
                                         anyhow::anyhow!("Failed to serialize witnesses: {}", e)
-                                    })?,
-                                );
+                                    })?);
                             }
                         }
                         v

@@ -369,3 +369,50 @@ pub fn large_block(transaction_count: usize) -> Block {
 pub fn default_protocol_version() -> ProtocolVersion {
     ProtocolVersion::Regtest
 }
+
+// ---------------------------------------------------------------------------
+// ECDSA helpers for integration tests (blvm-secp256k1 — no rust-secp256k1 crate).
+// ---------------------------------------------------------------------------
+
+/// Valid curve scalar **1**, big-endian 32-byte encoding.
+#[inline]
+pub fn test_secp256k1_scalar_one() -> [u8; 32] {
+    let mut k = [0u8; 32];
+    k[31] = 1;
+    k
+}
+
+/// Small distinct test scalar (`n` in 1..=127, stored in the least significant byte).
+#[inline]
+pub fn test_secp256k1_scalar_small(n: u8) -> [u8; 32] {
+    debug_assert!(n >= 1, "use non-zero scalar");
+    let mut k = [0u8; 32];
+    k[31] = n;
+    k
+}
+
+/// RFC6979 ECDSA compact signature + compressed pubkey, both hex-encoded.
+pub fn ecdsa_compact_sig_hex_and_pubkey_hex(
+    seckey32: &[u8; 32],
+    msg32: &[u8; 32],
+) -> (String, String) {
+    use blvm_secp256k1::ecdsa::{ecdsa_sign_compact_rfc6979, ge_to_compressed, pubkey_from_secret};
+    use blvm_secp256k1::scalar::Scalar;
+    let sig = ecdsa_sign_compact_rfc6979(msg32, seckey32).expect("ECDSA sign (test key)");
+    let mut sec = Scalar::zero();
+    assert!(
+        !sec.set_b32(seckey32) && !sec.is_zero(),
+        "invalid test seckey"
+    );
+    let pk = ge_to_compressed(&pubkey_from_secret(&sec));
+    (hex::encode(sig), hex::encode(pk))
+}
+
+/// 33-byte compressed pubkey from raw seckey.
+pub fn compressed_pubkey33_from_seckey(seckey32: &[u8; 32]) -> [u8; 33] {
+    use blvm_secp256k1::ecdsa::{ge_to_compressed, pubkey_from_secret};
+    use blvm_secp256k1::scalar::Scalar;
+    let mut sec = Scalar::zero();
+    assert!(!sec.set_b32(seckey32) && !sec.is_zero());
+    ge_to_compressed(&pubkey_from_secret(&sec))
+}

@@ -166,14 +166,20 @@ impl ChunkAssigner {
             return None;
         }
 
-        // Try retry queue first (critical chunk, then earliest)
+        // Try retry queue first (critical chunk, then earliest).
+        //
+        // IMPORTANT: retry-queue chunks are NOT filtered by max_start. These are stall-recovery
+        // chunks — the coordinator explicitly decided they're needed to unblock progress. Applying
+        // the max_ahead window to retry chunks causes a deadlock when the missing chunk starts just
+        // past max_start: validation stalls (can't advance), max_start can't grow (validation stuck),
+        // and the chunk can never be taken (max_start check fails). The retry_queue is always small
+        // (0–1 entries in practice), so skipping the window check here poses no memory risk.
         {
             let mut retry = self.retry_queue.lock().unwrap();
             let critical = retry.iter().enumerate().find(|(_, (s, e, ex))| {
                 *s <= next_needed
                     && next_needed <= *e
                     && ex.as_ref() != Some(&peer_id.to_string())
-                    && *s <= max_start
                     && allow_chunk(*s)
             });
             if let Some((i, _)) = critical {
@@ -185,7 +191,7 @@ impl ChunkAssigner {
                 .iter()
                 .enumerate()
                 .filter(|(_, (_, _, ex))| ex.as_ref() != Some(&peer_id.to_string()))
-                .filter(|(_, (s, _, _))| *s <= max_start && allow_chunk(*s))
+                .filter(|(_, (s, _, _))| allow_chunk(*s))
                 .min_by_key(|(_, (s, _, _))| *s);
             if let Some((i, _)) = candidate {
                 let (start, end, _) = retry.remove(i).unwrap();

@@ -9,6 +9,7 @@ pub mod error;
 pub mod lock;
 pub mod logging;
 pub mod option;
+pub mod ram_tier;
 pub mod retry;
 pub mod signal;
 pub mod time;

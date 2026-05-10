@@ -3,13 +3,14 @@
 //! Tests the full module payment flow including payment request creation,
 //! payment verification, and the 75/15/10 split.
 
+mod common;
+
 use blvm_node::config::PaymentConfig;
 use blvm_node::module::registry::manifest::{ModuleManifest, PaymentSection};
 use blvm_node::module::security::signing::ModuleSigner;
 use blvm_node::payment::processor::{PaymentError, PaymentProcessor};
 use blvm_protocol::address::{BitcoinAddress, Network};
 use blvm_protocol::payment::PaymentOutput;
-use secp256k1::{Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
@@ -40,19 +41,13 @@ fn create_manifest_with_payment(
 ) -> ModuleManifest {
     // Create a payment signature matching the actual implementation
     // The message format is: author_address||commons_address||price_sats
-    let secp = Secp256k1::new();
-    let test_key = SecretKey::from_slice(&[1; 32]).unwrap();
+    let test_key = common::test_secp256k1_scalar_one();
 
     // Create message in the format used by verify_payment_addresses
     let message_data = format!("{}||{}||{}", author_address, commons_address, price_sats);
-    let message_hash = Sha256::digest(message_data.as_bytes());
-    let message = secp256k1::Message::from_digest_slice(&message_hash).unwrap();
-    let signature = secp.sign_ecdsa(&message, &test_key);
-    let signature_hex = hex::encode(signature.serialize_compact());
-
-    // Get public key for signature section
-    let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &test_key);
-    let pubkey_hex = hex::encode(pubkey.serialize());
+    let message_hash: [u8; 32] = Sha256::digest(message_data.as_bytes()).into();
+    let (signature_hex, pubkey_hex) =
+        common::ecdsa_compact_sig_hex_and_pubkey_hex(&test_key, &message_hash);
 
     // Create signature section first (needed for payment verification)
     use blvm_node::module::registry::manifest::{MaintainerSignature, SignatureSection};

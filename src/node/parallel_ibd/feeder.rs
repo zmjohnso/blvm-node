@@ -14,7 +14,9 @@ use parking_lot::{Condvar, Mutex};
 use crossbeam_channel::Receiver;
 
 // Static buffer limits passed at startup; no dynamic recalculation needed.
-use super::types::{estimate_block_bytes, FeederBufferValue, ReadyItem, SharedBlock, SharedWitnesses};
+use super::types::{
+    estimate_block_bytes, FeederBufferValue, ReadyItem, SharedBlock, SharedWitnesses,
+};
 
 /// Height-partitioned pending blocks. With one shard this matches a single `BTreeMap`.
 pub(crate) struct FeederBuffer {

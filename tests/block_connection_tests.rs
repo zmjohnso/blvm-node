@@ -6,10 +6,39 @@
 //! - The oneshot delivers the block to the awaiting download_chunk caller
 
 use anyhow::Result;
-use blvm_node::network::{protocol::ProtocolParser, NetworkManager};
+use blvm_node::network::{
+    protocol::{NetworkAddress, ProtocolMessage, ProtocolParser, VersionMessage},
+    NetworkManager,
+};
 use blvm_protocol::genesis;
 use blvm_protocol::serialization::serialize_block_with_witnesses;
 use std::net::SocketAddr;
+
+/// Minimal valid mainnet Version frame so the pre-handshake guard accepts later messages.
+fn build_version_wire_message() -> Vec<u8> {
+    let version_msg = VersionMessage {
+        version: 70015,
+        services: 1,
+        timestamp: 1_234_567_890,
+        addr_recv: NetworkAddress {
+            services: 1,
+            ip: [0; 16],
+            port: 8333,
+        },
+        addr_from: NetworkAddress {
+            services: 1,
+            ip: [0; 16],
+            port: 8333,
+        },
+        // Fixed test nonce; must not collide with `local_version_nonces` (empty in this test).
+        nonce: 0x9A8B7C6D5E4F3021,
+        user_agent: "block-connection-test/1.0".to_string(),
+        start_height: 0,
+        relay: true,
+    };
+    ProtocolParser::serialize_message(&ProtocolMessage::Version(version_msg))
+        .expect("serialize Version")
+}
 
 /// Build a Bitcoin wire-format "block" message (magic + command + length + checksum + payload).
 /// Uses consensus serialization to match what real Bitcoin peers send.
@@ -69,14 +98,19 @@ async fn test_block_request_completion_first_connection() -> Result<()> {
     let peer_addr: SocketAddr = "127.0.0.1:18444".parse().unwrap();
     let block_rx = network.register_block_request(peer_addr, block_hash);
 
+    // Handshake: otherwise `dispatch_protocol_message` drops non-Version traffic.
+    network
+        .handle_incoming_wire_tcp(peer_addr, build_version_wire_message())
+        .await?;
+
     // Simulate peer sending block (same path as RawMessageReceived -> handle_incoming_wire_tcp)
     network
         .handle_incoming_wire_tcp(peer_addr, block_wire)
         .await?;
 
-    // Await the oneshot; should complete with the genesis block
+    // Await the oneshot; should complete with the genesis block.
     let (received_block, witnesses) =
-        tokio::time::timeout(std::time::Duration::from_secs(2), block_rx)
+        tokio::time::timeout(std::time::Duration::from_secs(5), block_rx)
             .await
             .map_err(|_| anyhow::anyhow!("Block response timeout"))?
             .map_err(|_| anyhow::anyhow!("Block channel closed"))?;

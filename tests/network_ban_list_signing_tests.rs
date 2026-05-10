@@ -1,10 +1,14 @@
 //! Tests for Ban List Signing
 
+mod common;
+
 use blvm_node::network::ban_list_signing::{
     sign_ban_list, verify_ban_list_signature, SignedBanListMessage,
 };
 use blvm_node::network::protocol::BanListMessage;
-use secp256k1::{PublicKey, Secp256k1, SecretKey};
+use common::{
+    compressed_pubkey33_from_seckey, test_secp256k1_scalar_one, test_secp256k1_scalar_small,
+};
 
 fn create_test_ban_list() -> BanListMessage {
     BanListMessage {
@@ -17,8 +21,7 @@ fn create_test_ban_list() -> BanListMessage {
 
 #[test]
 fn test_sign_ban_list() {
-    let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
+    let secret_key = test_secp256k1_scalar_one();
     let ban_list = create_test_ban_list();
 
     let result = sign_ban_list(&ban_list, &secret_key);
@@ -30,9 +33,8 @@ fn test_sign_ban_list() {
 
 #[test]
 fn test_verify_ban_list_signature_valid() {
-    let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
-    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+    let secret_key = test_secp256k1_scalar_one();
+    let public_key = compressed_pubkey33_from_seckey(&secret_key);
     let ban_list = create_test_ban_list();
 
     // Sign
@@ -46,10 +48,9 @@ fn test_verify_ban_list_signature_valid() {
 
 #[test]
 fn test_verify_ban_list_signature_invalid() {
-    let secp = Secp256k1::new();
-    let secret_key1 = SecretKey::from_slice(&[1; 32]).unwrap();
-    let secret_key2 = SecretKey::from_slice(&[2; 32]).unwrap();
-    let public_key2 = PublicKey::from_secret_key(&secp, &secret_key2);
+    let secret_key1 = test_secp256k1_scalar_one();
+    let secret_key2 = test_secp256k1_scalar_small(2);
+    let public_key2 = compressed_pubkey33_from_seckey(&secret_key2);
     let ban_list = create_test_ban_list();
 
     // Sign with key1
@@ -63,9 +64,8 @@ fn test_verify_ban_list_signature_invalid() {
 
 #[test]
 fn test_verify_ban_list_signature_wrong_length() {
-    let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
-    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+    let secret_key = test_secp256k1_scalar_one();
+    let public_key = compressed_pubkey33_from_seckey(&secret_key);
     let ban_list = create_test_ban_list();
 
     // Invalid signature length
@@ -78,9 +78,8 @@ fn test_verify_ban_list_signature_wrong_length() {
 
 #[test]
 fn test_verify_ban_list_signature_modified_data() {
-    let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
-    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+    let secret_key = test_secp256k1_scalar_one();
+    let public_key = compressed_pubkey33_from_seckey(&secret_key);
     let ban_list = create_test_ban_list();
 
     // Sign
@@ -98,7 +97,7 @@ fn test_verify_ban_list_signature_modified_data() {
 
 #[test]
 fn test_signed_ban_list_message_new() {
-    let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
+    let secret_key = test_secp256k1_scalar_one();
     let ban_list = create_test_ban_list();
 
     let result = SignedBanListMessage::new(ban_list.clone(), &secret_key);
@@ -111,7 +110,7 @@ fn test_signed_ban_list_message_new() {
 
 #[test]
 fn test_signed_ban_list_message_verify() {
-    let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
+    let secret_key = test_secp256k1_scalar_one();
     let ban_list = create_test_ban_list();
 
     let signed = SignedBanListMessage::new(ban_list, &secret_key).unwrap();
@@ -124,14 +123,13 @@ fn test_signed_ban_list_message_verify() {
 
 #[test]
 fn test_signed_ban_list_message_verify_invalid() {
-    let secret_key1 = SecretKey::from_slice(&[1; 32]).unwrap();
-    let secret_key2 = SecretKey::from_slice(&[2; 32]).unwrap();
+    let secret_key1 = test_secp256k1_scalar_one();
     let ban_list = create_test_ban_list();
 
     // Create signed message with key1
     let mut signed = SignedBanListMessage::new(ban_list, &secret_key1).unwrap();
 
-    // Modify signature to make it invalid
+    // Corrupt signature (still 64 bytes, should not verify)
     signed.signature = vec![0u8; 64];
 
     // Verify should fail

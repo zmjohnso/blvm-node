@@ -309,6 +309,13 @@ impl MemoryGuard {
     /// stay on tight tiers (OOM fixes) instead of the 17–31 GiB workstation path.
     pub(crate) const EXTENDED_SIXTEEN_CLASS_MB: u64 = 18 * 1024;
 
+    /// GiB tier label from total RAM (MiB): `(total_mb + 512) / 1024`. Delegates to
+    /// [`crate::utils::ram_tier`] (same formula as RocksDB tier sizing).
+    #[inline]
+    pub(crate) fn total_gb_rounded(total_mb: u64) -> u64 {
+        crate::utils::ram_tier::total_gb_rounded(total_mb)
+    }
+
     pub(crate) fn new() -> Self {
         // Prefer /proc/meminfo on Linux — works regardless of feature flags.
         // This prevents the sysinfo-disabled fallback (8192/6144) from starving the UTXO cache
@@ -370,7 +377,7 @@ impl MemoryGuard {
             available_mb = (total_mb * 60 / 100).max(2048);
         }
 
-        let total_gb = (total_mb + 512) / 1024;
+        let total_gb = Self::total_gb_rounded(total_mb);
 
         // Budget: fraction of total RAM.
         // On <=16 GiB use 15% — enough for a ~1 GB UTXO in-memory cache on 16 GiB without
@@ -573,9 +580,9 @@ impl MemoryGuard {
         // internal buffers. Retire scales concurrency down automatically from [`PressureLevel`]
         // (`utxo_flush_concurrency_cap`); tier sets the **floor** used under Critical+.
         let max_utxo_flushes_auto: usize = if total_mb <= Self::EXTENDED_SIXTEEN_CLASS_MB {
-            2
-        } else if total_gb <= 24 {
             8
+        } else if total_gb <= 24 {
+            12
         } else if total_gb <= 32 {
             16
         } else {
@@ -786,7 +793,7 @@ impl MemoryGuard {
     /// `min(spare_formula, this)` so RAM-tight machines stay bounded.
     #[inline]
     pub(crate) fn tier_max_download_ahead_blocks(total_mb: u64) -> u64 {
-        let total_gb = (total_mb + 512) / 1024;
+        let total_gb = Self::total_gb_rounded(total_mb);
         if total_gb < 16 {
             256
         } else if total_gb <= 16 || total_mb <= Self::EXTENDED_SIXTEEN_CLASS_MB {
@@ -803,7 +810,7 @@ impl MemoryGuard {
     /// the single committer falls behind; bounded and tiered so 16 GiB hosts stay conservative.
     #[inline]
     pub(crate) fn ibd_utxo_flush_queue_depth_default(&self) -> usize {
-        let total_gb = (self.total_mb + 512) / 1024;
+        let total_gb = Self::total_gb_rounded(self.total_mb);
         if self.total_mb <= Self::EXTENDED_SIXTEEN_CLASS_MB {
             128
         } else if total_gb <= 24 {
