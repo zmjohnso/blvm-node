@@ -2716,4 +2716,3 @@ impl NetworkManager {
 }
 
 // NetworkManager: internal state uses Arc<Mutex>/Arc<RwLock> and is Send + Sync when those hold Send types.
-

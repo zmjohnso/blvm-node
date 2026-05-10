@@ -1340,8 +1340,10 @@ impl ModuleManager {
         // HTTP download from the registry before giving up.
         #[cfg(feature = "governance")]
         if !self.enabled_modules.is_empty() {
-            let already_found: std::collections::HashSet<&str> =
-                discovered_modules.iter().map(|m| m.manifest.name.as_str()).collect();
+            let already_found: std::collections::HashSet<&str> = discovered_modules
+                .iter()
+                .map(|m| m.manifest.name.as_str())
+                .collect();
             let missing: Vec<String> = self
                 .enabled_modules
                 .iter()
@@ -1601,8 +1603,7 @@ impl ModuleManager {
             .find(|e| e.name == name)
             .ok_or_else(|| {
                 ModuleError::OperationError(format!(
-                    "Module '{}' not found in registry at {}",
-                    name, registry_url
+                    "Module '{name}' not found in registry at {registry_url}"
                 ))
             })?;
 
@@ -1625,8 +1626,7 @@ impl ModuleManager {
 
         let binary_info = entry.binaries.get(platform).ok_or_else(|| {
             ModuleError::OperationError(format!(
-                "No binary for platform '{}' in registry entry for '{}'",
-                platform, name
+                "No binary for platform '{platform}' in registry entry for '{name}'"
             ))
         })?;
 
@@ -1709,7 +1709,10 @@ impl ModuleManager {
                         .map_err(|e| ModuleError::op_err("Failed to write module.toml", e))?;
                 }
                 Err(e) => {
-                    warn!("Bootstrap: could not fetch module.toml for '{}': {}", name, e);
+                    warn!(
+                        "Bootstrap: could not fetch module.toml for '{}': {}",
+                        name, e
+                    );
                 }
             }
         }

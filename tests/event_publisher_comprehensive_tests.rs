@@ -16,7 +16,6 @@ fn test_event_publisher_creation() {
     assert!(true);
 }
 
-
 #[tokio::test]
 async fn test_event_publisher_new_block() {
     let event_manager = Arc::new(EventManager::new());

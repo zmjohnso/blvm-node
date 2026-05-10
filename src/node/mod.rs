@@ -1361,9 +1361,7 @@ impl Node {
 
             self.module_subsystem
                 .get_or_insert_with(Default::default)
-                .event_publisher = {
-                Some(Arc::new(EventPublisher::new(event_manager)))
-            };
+                .event_publisher = Some(Arc::new(EventPublisher::new(event_manager)));
             info!("Event publisher initialized");
 
             // Set EventPublisher on MempoolManager for mempool event publishing

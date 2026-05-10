@@ -1,0 +1,7 @@
+# cargo audit — align with blvm/.cargo/audit.toml for shared transitive advisories.
+[advisories]
+ignore = [
+    # hickory via iroh 0.95; tracked with iroh upgrade (see blvm repo audit.toml).
+    "RUSTSEC-2026-0118",
+    "RUSTSEC-2026-0119",
+]

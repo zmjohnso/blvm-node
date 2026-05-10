@@ -341,29 +341,30 @@ impl ControlRpc {
                     Ok(resp_bytes) => {
                         let resp: serde_json::Value =
                             serde_json::from_slice(&resp_bytes).unwrap_or_default();
-                        if !resp.get("installed").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        if !resp
+                            .get("installed")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
                             let err_msg = resp
                                 .get("error")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("unknown marketplace error");
                             return Err(RpcError::internal_error(format!(
-                                "Module '{}' not found locally and marketplace install failed: {}",
-                                name, err_msg
+                                "Module '{name}' not found locally and marketplace install failed: {err_msg}"
                             )));
                         }
                         // Re-discover after marketplace install.
                         let mut manager = mgr.lock().await;
                         try_local(&mut manager).map_err(|e| {
                             RpcError::internal_error(format!(
-                                "Module '{}' installed by marketplace but still not discoverable: {}",
-                                name, e
+                                "Module '{name}' installed by marketplace but still not discoverable: {e}"
                             ))
                         })?
                     }
                     Err(e) => {
                         return Err(RpcError::internal_error(format!(
-                            "Module '{}' not found locally and marketplace unavailable: {}",
-                            name, e
+                            "Module '{name}' not found locally and marketplace unavailable: {e}"
                         )));
                     }
                 }
