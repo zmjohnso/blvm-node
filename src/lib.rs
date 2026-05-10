@@ -26,7 +26,6 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::large_enum_variant)]
 #![allow(clippy::type_complexity)] // Module storage, RPC types; refactor would be large
-#![allow(clippy::arc_with_non_send_sync)] // ZMQ Socket is not Sync; zmq crate limitation
 #![allow(clippy::field_reassign_with_default)] // Many config structs; init would be verbose
 #![allow(clippy::collapsible_match)] // Readability preference for nested matches
 #![allow(unused_doc_comments, unused_imports, unused_variables, unused_mut)] // Feature-gated modules, optional deps, and cfg-heavy paths
@@ -53,10 +52,6 @@ pub mod storage;
 pub mod utils;
 #[cfg(feature = "production")]
 pub mod validation;
-#[cfg(feature = "zmq")]
-extern crate zeromq; // zeromq = { package = "zmq" } in Cargo.toml
-#[cfg(feature = "zmq")]
-pub mod zmq;
 
 // Re-export config module
 pub use config::*;

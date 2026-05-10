@@ -1,6 +1,6 @@
 //! Event Publisher Comprehensive Tests
 //!
-//! Tests for event publisher functionality including module events and ZMQ.
+//! Tests for event publisher functionality including module events.
 
 use blvm_node::module::api::events::EventManager;
 use blvm_node::node::event_publisher::EventPublisher;
@@ -16,21 +16,6 @@ fn test_event_publisher_creation() {
     assert!(true);
 }
 
-#[cfg(feature = "zmq")]
-#[test]
-fn test_event_publisher_with_zmq() {
-    use blvm_node::zmq::publisher::{ZmqConfig, ZmqPublisher};
-
-    let event_manager = Arc::new(EventManager::new());
-    let zmq_config = ZmqConfig::default();
-    let zmq_publisher = ZmqPublisher::new(&zmq_config).ok();
-    let zmq_arc = zmq_publisher.map(Arc::new);
-
-    let _publisher = EventPublisher::with_zmq(event_manager, zmq_arc);
-
-    // Should create successfully
-    assert!(true);
-}
 
 #[tokio::test]
 async fn test_event_publisher_new_block() {

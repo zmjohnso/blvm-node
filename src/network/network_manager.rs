@@ -2715,11 +2715,5 @@ impl NetworkManager {
     }
 }
 
-// Safety: NetworkManager is safe to share across threads (Sync) because:
-// - All internal state is protected by Arc<Mutex<>> or Arc<RwLock<>> which are Sync
-// - EventPublisher is already marked as Sync (see event_publisher.rs)
-// - All async operations are Send and don't require synchronous access to internal state
-// - The ZmqPublisher's Socket is only accessed through async methods which are Send
-// This is a workaround for ZMQ's Socket type not being Sync, but the actual usage is safe.
-#[cfg(feature = "zmq")]
-unsafe impl Sync for NetworkManager {}
+// NetworkManager: internal state uses Arc<Mutex>/Arc<RwLock> and is Send + Sync when those hold Send types.
+

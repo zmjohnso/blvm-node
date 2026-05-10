@@ -1359,47 +1359,10 @@ impl Node {
             // Clone event_manager Arc while lock is held so we can use it after
             let event_manager = Arc::clone(module_manager.lock().await.event_manager());
 
-            // Initialize ZMQ publisher if configured
-            // Note: ZMQ is enabled by default, but only initializes if endpoints are configured.
-            // To disable: either don't configure endpoints, or build without --features zmq
             self.module_subsystem
                 .get_or_insert_with(Default::default)
                 .event_publisher = {
-                #[cfg(feature = "zmq")]
-                {
-                    let zmq_publisher = if let Some(zmq_config) =
-                        self.config_sub(|c| c.zmq.as_ref())
-                    {
-                        if zmq_config.is_enabled() {
-                            match crate::zmq::ZmqPublisher::new(zmq_config) {
-                                Ok(publisher) => {
-                                    info!("ZMQ publisher initialized");
-                                    Some(Arc::new(publisher))
-                                }
-                                Err(e) => {
-                                    warn!("Failed to initialize ZMQ publisher: {}", e);
-                                    None
-                                }
-                            }
-                        } else {
-                            debug!(
-                                    "ZMQ configured but no endpoints enabled - ZMQ publisher not initialized"
-                                );
-                            None
-                        }
-                    } else {
-                        debug!("No ZMQ configuration provided - ZMQ publisher not initialized");
-                        None
-                    };
-                    Some(Arc::new(EventPublisher::with_zmq(
-                        event_manager,
-                        zmq_publisher,
-                    )))
-                }
-                #[cfg(not(feature = "zmq"))]
-                {
-                    Some(Arc::new(EventPublisher::new(event_manager)))
-                }
+                Some(Arc::new(EventPublisher::new(event_manager)))
             };
             info!("Event publisher initialized");
 

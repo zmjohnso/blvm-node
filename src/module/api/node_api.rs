@@ -2129,11 +2129,6 @@ impl NodeAPI for NodeApiImpl {
     }
 }
 
-// Safety: NodeApiImpl is safe to share across threads (Sync) because:
-// - All internal mutable state is protected by Arc, RwLock, or Mutex, ensuring safe concurrent access.
-// - The MempoolManager (which contains ZMQ sockets) is already marked as `unsafe impl Sync`.
-// - The EventPublisher (which contains ZMQ sockets) is already marked as `unsafe impl Sync`.
-// - The NetworkManager (which contains ZMQ sockets) is already marked as `unsafe impl Sync`.
-// - All other fields are either Arc-wrapped or are already Sync types.
-// This is a workaround for ZMQ's Socket type not being Sync, but the actual usage is safe.
+// Safety: NodeApiImpl is safe to share across threads (Sync) because internal mutable state
+// uses Arc/RwLock/Mutex as appropriate; any non-`Sync` types are only touched via these primitives.
 unsafe impl Sync for NodeApiImpl {}

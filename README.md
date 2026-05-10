@@ -66,9 +66,9 @@ Default binary builds enable **RocksDB** (`rocksdb` feature). RocksDB requires a
 To build with **redb** only (pure Rust, no `librocksdb-sys`):
 
 ```bash
-cargo build --no-default-features --features "redb,production,sysinfo,nix,libc,governance,zmq,utxo-commitments,protocol-verification"
+cargo build --no-default-features --features "redb,production,sysinfo,nix,libc,governance,utxo-commitments,protocol-verification"
 ```
-Omit `governance` if you do not need the HTTP client (Commons auto-detect uses `reqwest` via that feature). Omit `zmq` to disable notification integration at compile time (`zmq` may still be resolved as a dependency until the crate is made fully optional).
+Omit `governance` if you do not need the HTTP client (Commons auto-detect uses `reqwest` via that feature). For Bitcoin-style **ZMQ PUB** notifications, load the **`blvm-zmq`** module (no longer a `blvm-node` feature flag).
 
 **Note**: RocksDB and erlay features are mutually exclusive due to dependency conflicts.
 

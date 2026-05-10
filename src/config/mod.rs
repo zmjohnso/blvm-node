@@ -686,10 +686,6 @@ pub struct NodeConfig {
     /// Module resource limits configuration
     pub module_resource_limits: Option<ModuleResourceLimitsConfig>,
 
-    /// ZMQ notification configuration
-    #[cfg(feature = "zmq")]
-    pub zmq: Option<ZmqConfig>,
-
     /// Logging configuration
     pub logging: Option<LoggingConfig>,
 
@@ -788,8 +784,6 @@ impl Default for NodeConfig {
             replay_protection: None,
             module_resource_limits: None,
             spam_ban: None,
-            #[cfg(feature = "zmq")]
-            zmq: None,
             logging: None,
             mempool: None,
             rbf: None,
@@ -1116,9 +1110,6 @@ impl NodeConfig {
 }
 
 /// ZMQ notification configuration
-#[cfg(feature = "zmq")]
-pub use crate::zmq::ZmqConfig;
-
 /// Payment configuration (BIP70)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentConfig {

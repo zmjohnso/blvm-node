@@ -1,5 +1,8 @@
 # ZMQ Notifications
 
+
+> **2025 update:** ZeroMQ is no longer built into `blvm-node`. Use the **`blvm-zmq`** module. Configure endpoints in the module `config.toml` (same keys as former `[zmq]`). Repository: <https://github.com/BTCDecoded/blvm-zmq>.
+
 BLLVM node supports ZeroMQ (ZMQ) notifications for real-time blockchain event notifications, compatible with standard Bitcoin node notification interfaces.
 
 ## Overview
