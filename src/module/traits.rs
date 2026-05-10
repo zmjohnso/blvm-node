@@ -39,6 +39,10 @@ pub struct ModuleMetadata {
     pub author: String,
     /// Capabilities this module declares it can use
     pub capabilities: Vec<String>,
+    /// Core JSON-RPC methods this module intends to override at runtime.
+    /// Validated against `OVERRIDABLE_CORE_RPC_METHODS` at load time.
+    #[serde(default)]
+    pub rpc_overrides: Vec<String>,
     /// Required dependencies (module names with versions)
     /// Hard dependencies - module cannot load without them
     pub dependencies: HashMap<String, String>,
@@ -268,6 +272,19 @@ pub trait NodeAPI: Send + Sync {
 
     /// Unregister an RPC endpoint (on module shutdown)
     async fn unregister_rpc_endpoint(&self, method: &str) -> Result<(), ModuleError>;
+
+    /// Override a core RPC method with a module handler.
+    ///
+    /// `method` must be listed in `OVERRIDABLE_CORE_RPC_METHODS`; otherwise the node rejects
+    /// the request.  The description is informational (shown in `getrpcinfo`).
+    async fn register_core_rpc_override(
+        &self,
+        method: String,
+        description: String,
+    ) -> Result<(), ModuleError>;
+
+    /// Release a previously registered core RPC override.
+    async fn unregister_core_rpc_override(&self, method: &str) -> Result<(), ModuleError>;
 
     // === Timers and Scheduled Tasks ===
     /// Register a periodic timer

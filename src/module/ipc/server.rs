@@ -1153,6 +1153,25 @@ impl ModuleIpcServer {
                     ResponsePayload::RpcEndpointUnregistered,
                 ))
             }
+            RequestPayload::RegisterCoreRpcOverride {
+                method,
+                description,
+            } => {
+                node_api
+                    .register_core_rpc_override(method.clone(), description.clone())
+                    .await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::CoreRpcOverrideRegistered,
+                ))
+            }
+            RequestPayload::UnregisterCoreRpcOverride { method } => {
+                node_api.unregister_core_rpc_override(method).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::CoreRpcOverrideUnregistered,
+                ))
+            }
             // Timers and Scheduled Tasks
             RequestPayload::RegisterTimer {
                 interval_seconds: _,

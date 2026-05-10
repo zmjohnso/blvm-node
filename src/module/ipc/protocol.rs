@@ -98,6 +98,9 @@ pub enum MessageType {
     // Module RPC Endpoint Registration
     RegisterRpcEndpoint,
     UnregisterRpcEndpoint,
+    // Core RPC method override (allowlisted methods only)
+    RegisterCoreRpcOverride,
+    UnregisterCoreRpcOverride,
     // Timers and Scheduled Tasks
     RegisterTimer,
     CancelTimer,
@@ -246,6 +249,14 @@ pub enum RequestPayload {
         description: String,
     },
     UnregisterRpcEndpoint {
+        method: String,
+    },
+    // Core RPC method override (allowlisted methods only)
+    RegisterCoreRpcOverride {
+        method: String,
+        description: String,
+    },
+    UnregisterCoreRpcOverride {
         method: String,
     },
     // Timers and Scheduled Tasks
@@ -475,6 +486,9 @@ pub enum ResponsePayload {
     // Module RPC Endpoint Registration responses
     RpcEndpointRegistered,
     RpcEndpointUnregistered,
+    // Core RPC override responses
+    CoreRpcOverrideRegistered,
+    CoreRpcOverrideUnregistered,
     // Timers and Scheduled Tasks responses
     TimerId(u64),
     TaskId(u64),

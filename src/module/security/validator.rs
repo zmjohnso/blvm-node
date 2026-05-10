@@ -143,6 +143,8 @@ impl RequestValidator {
             // Module RPC Endpoint Registration - validated by permissions
             | RequestPayload::RegisterRpcEndpoint { .. }
             | RequestPayload::UnregisterRpcEndpoint { .. }
+            | RequestPayload::RegisterCoreRpcOverride { .. }
+            | RequestPayload::UnregisterCoreRpcOverride { .. }
             // Timers and Scheduled Tasks - callbacks cannot be serialized, so these will error
             | RequestPayload::RegisterTimer { .. }
             | RequestPayload::CancelTimer { .. }

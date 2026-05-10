@@ -159,6 +159,12 @@ pub struct ModuleManifest {
     // ============================================================================
     // Advanced Features (Optional)
     // ============================================================================
+    /// JSON-RPC core methods this module intends to override.
+    /// Each entry must be in `OVERRIDABLE_CORE_RPC_METHODS`; validated at load time.
+    /// The module registers the actual handler at runtime via `register_core_rpc_override`.
+    #[serde(default)]
+    pub rpc_overrides: Vec<String>,
+
     /// Signature section (for signed/verified modules)
     /// Contains maintainer signatures and threshold
     #[serde(default)]
@@ -209,6 +215,7 @@ impl ModuleManifest {
             description: self.description.clone().unwrap_or_default(),
             author: self.author.clone().unwrap_or_default(),
             capabilities: self.capabilities.clone(),
+            rpc_overrides: self.rpc_overrides.clone(),
             dependencies: self.dependencies.clone(),
             optional_dependencies: self.optional_dependencies.clone(),
             entry_point: self.entry_point.clone(),

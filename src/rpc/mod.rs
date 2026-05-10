@@ -11,8 +11,7 @@ pub mod errors;
 pub mod mempool;
 pub mod methods;
 pub mod mining;
-#[cfg(feature = "miniscript")]
-pub mod miniscript;
+
 pub mod network;
 pub mod params;
 #[cfg(feature = "bip70-http")]
@@ -87,6 +86,9 @@ pub struct RpcManager {
     max_connections_per_ip_per_minute: u32,
     /// Batch rate multiplier cap: min(batch_len, this) (default: 10)
     batch_rate_multiplier_cap: u32,
+    /// Shared RpcServer arc — set after start() so ModuleManager and NodeApiImpl can register
+    /// dynamic endpoints and overrides against the live server.
+    server_arc: Option<Arc<server::RpcServer>>,
     /// Connection rate limit window in seconds (default: 60)
     connection_rate_limit_window_seconds: u64,
     /// Request timeout config (storage/network/rpc timeouts)
@@ -133,7 +135,14 @@ impl RpcManager {
             request_timeouts: None,
             module_manager: None,
             protocol_engine: None,
+            server_arc: None,
         }
+    }
+
+    /// Return the live `RpcServer` arc (available after `start()`).
+    /// Used by `ModuleManager` and `NodeApiImpl` to register dynamic endpoints.
+    pub fn rpc_server(&self) -> Option<Arc<server::RpcServer>> {
+        self.server_arc.clone()
     }
 
     /// Set batch rate multiplier cap (from config or BLVM_RPC_BATCH_RATE_MULTIPLIER_CAP)
@@ -527,9 +536,13 @@ impl RpcManager {
             }
         };
 
+        // Wrap in Arc so ModuleManager and NodeApiImpl can reference the same live server.
+        let server_arc = Arc::new(server);
+        self.server_arc = Some(Arc::clone(&server_arc));
+
         // Start TCP server in a background task
         let tcp_handle = tokio::spawn(async move {
-            if let Err(e) = server.start().await {
+            if let Err(e) = server_arc.start().await {
                 error!("TCP RPC server error: {}", e);
             }
         });

@@ -262,6 +262,9 @@ impl PermissionChecker {
             // Module RPC Endpoint Registration
             RequestPayload::RegisterRpcEndpoint { .. } => Permission::RegisterRpcEndpoint,
             RequestPayload::UnregisterRpcEndpoint { .. } => Permission::RegisterRpcEndpoint,
+            // Core RPC override (uses the same permission; allowlist enforcement is in RpcServer)
+            RequestPayload::RegisterCoreRpcOverride { .. } => Permission::RegisterRpcEndpoint,
+            RequestPayload::UnregisterCoreRpcOverride { .. } => Permission::RegisterRpcEndpoint,
             // Timers and Scheduled Tasks
             RequestPayload::RegisterTimer { .. } => Permission::ManageTimers,
             RequestPayload::CancelTimer { .. } => Permission::ManageTimers,

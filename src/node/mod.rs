@@ -1037,6 +1037,11 @@ impl Node {
             let sync_coord_arc = Arc::new(tokio::sync::Mutex::new(self.sync_coordinator.clone()));
             node_api_impl.set_sync_coordinator(sync_coord_arc);
 
+            // Wire live RpcServer so NodeApiImpl can register module endpoints / core overrides.
+            if let Some(rpc_server) = self.rpc.rpc_server() {
+                node_api_impl.set_rpc_server(Arc::clone(&rpc_server));
+            }
+
             // Set module manager for module discovery and RPC
             node_api_impl.set_module_manager(Arc::clone(module_manager));
 
@@ -1255,6 +1260,11 @@ impl Node {
                 warn!("Failed to initialize module registry - modules will only load from local directory");
             }
 
+            // Wire RpcServer into ModuleManager so unload_module can clean up endpoints/overrides.
+            if let Some(rpc_server) = self.rpc.rpc_server() {
+                module_manager.lock().await.with_rpc_server(rpc_server);
+            }
+
             module_manager
                 .lock()
                 .await
@@ -1289,6 +1299,16 @@ impl Node {
                 .lock()
                 .await
                 .set_default_database_backend(backend_str.to_string());
+
+            // Apply enabled_modules allowlist from config before auto-loading.
+            if let Some(module_config) = self.config_sub(|c| c.modules.as_ref()) {
+                if !module_config.enabled_modules.is_empty() {
+                    module_manager
+                        .lock()
+                        .await
+                        .set_enabled_modules(module_config.enabled_modules.clone());
+                }
+            }
 
             // Auto-discover and load modules
             if let Err(e) = module_manager.lock().await.auto_load_modules().await {

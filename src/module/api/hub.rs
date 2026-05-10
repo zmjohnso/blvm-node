@@ -129,6 +129,12 @@ impl ModuleApiHub {
         limiter.check_and_consume()
     }
 
+    /// Return a clone of the underlying NodeAPI arc for callers that need to make
+    /// inter-module calls (e.g. `loadmodule` marketplace fallback).
+    pub fn node_api(&self) -> Arc<dyn NodeAPI + Send + Sync> {
+        Arc::clone(&self.node_api)
+    }
+
     /// Register a module's permissions
     pub fn register_module_permissions(
         &mut self,
@@ -553,6 +559,19 @@ impl ModuleApiHub {
                 self.node_api.unregister_rpc_endpoint(method).await?;
                 ResponsePayload::RpcEndpointUnregistered
             }
+            RequestPayload::RegisterCoreRpcOverride {
+                method,
+                description,
+            } => {
+                self.node_api
+                    .register_core_rpc_override(method.clone(), description.clone())
+                    .await?;
+                ResponsePayload::CoreRpcOverrideRegistered
+            }
+            RequestPayload::UnregisterCoreRpcOverride { method } => {
+                self.node_api.unregister_core_rpc_override(method).await?;
+                ResponsePayload::CoreRpcOverrideUnregistered
+            }
             // Timers and Scheduled Tasks - not supported over IPC (callbacks cannot be serialized)
             RequestPayload::RegisterTimer { .. } => {
                 return Err(crate::module::traits::ModuleError::OperationError(
@@ -638,6 +657,8 @@ impl ModuleApiHub {
             // Module RPC Endpoint Registration
             RequestPayload::RegisterRpcEndpoint { .. } => "register_rpc_endpoint",
             RequestPayload::UnregisterRpcEndpoint { .. } => "unregister_rpc_endpoint",
+            RequestPayload::RegisterCoreRpcOverride { .. } => "register_core_rpc_override",
+            RequestPayload::UnregisterCoreRpcOverride { .. } => "unregister_core_rpc_override",
             // Timers and Scheduled Tasks
             RequestPayload::RegisterTimer { .. } => "register_timer",
             RequestPayload::CancelTimer { .. } => "cancel_timer",

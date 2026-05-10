@@ -13,7 +13,7 @@
 //!     -d '{"jsonrpc":"2.0","method":"getcongestion","params":[],"id":1}'
 //!
 //! Note: createbatch, addtobatch, broadcastbatch require the `ctv` feature.
-//! Note: getdescriptorinfo, analyzepsbt require the `miniscript` feature.
+//! Note: getdescriptorinfo, analyzepsbt require the `blvm-miniscript` module to be loaded.
 
 use serde_json::json;
 
@@ -126,7 +126,7 @@ fn main() -> anyhow::Result<()> {
 
     // ── Script Analysis Methods ─────────────────────────────────────────────
 
-    println!("=== Script Analysis (requires miniscript feature) ===");
+    println!("=== Script Analysis (requires blvm-miniscript module) ===");
     println!();
 
     // Example 6: Get descriptor info
@@ -164,9 +164,9 @@ fn main() -> anyhow::Result<()> {
     println!("  addtobatch          - Add outputs to a batch (ctv feature)");
     println!("  broadcastbatch      - Broadcast batch when conditions are met (ctv feature)");
     println!(
-        "  getdescriptorinfo   - Parse and validate an output descriptor (miniscript feature)"
+        "  getdescriptorinfo   - Parse and validate an output descriptor (requires blvm-miniscript module)"
     );
-    println!("  analyzepsbt         - Inspect PSBT signing status and fee (miniscript feature)");
+    println!("  analyzepsbt         - Inspect PSBT signing status and fee (requires blvm-miniscript module)");
     println!();
     println!("Typical batching workflow:");
     println!("  1. getcongestion           → check current fee environment");

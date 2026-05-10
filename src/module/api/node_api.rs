@@ -948,7 +948,7 @@ impl NodeAPI for NodeApiImpl {
 
         // Register with RPC server
         rpc_server
-            .register_module_endpoint(method.clone(), handler)
+            .register_module_endpoint(method.clone(), module_id.clone(), handler)
             .await
             .map_err(|e| ModuleError::op_err("Failed to register RPC endpoint", e))?;
 
@@ -962,6 +962,59 @@ impl NodeAPI for NodeApiImpl {
 
         rpc_server
             .unregister_module_endpoint(method)
+            .await
+            .map_err(ModuleError::OperationError)
+    }
+
+    async fn register_core_rpc_override(
+        &self,
+        method: String,
+        description: String,
+    ) -> Result<(), ModuleError> {
+        let rpc_server = self.rpc_server.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::RPC_SERVER_NOT_AVAILABLE.to_string())
+        })?;
+
+        let ipc_server = self.ipc_server.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::IPC_SERVER_NOT_AVAILABLE.to_string())
+        })?;
+
+        let module_id = self.get_module_id().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string())
+        })?;
+
+        let ipc_server_guard = ipc_server.lock().await;
+        let rpc_channel = ipc_server_guard
+            .get_rpc_channel(&module_id)
+            .await
+            .ok_or_else(|| {
+                ModuleError::OperationError(format!("RPC channel not found for module {module_id}"))
+            })?;
+        drop(ipc_server_guard);
+
+        let handler = Arc::new(crate::module::rpc::ipc_handler::IpcRpcHandler::new(
+            module_id.clone(),
+            method.clone(),
+            rpc_channel,
+        ));
+
+        rpc_server
+            .register_core_rpc_override(method, module_id, handler)
+            .await
+            .map_err(|e| ModuleError::op_err("Failed to register core RPC override", e))?;
+
+        // description is informational — stored in future getrpcinfo expansions
+        drop(description);
+        Ok(())
+    }
+
+    async fn unregister_core_rpc_override(&self, method: &str) -> Result<(), ModuleError> {
+        let rpc_server = self.rpc_server.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::RPC_SERVER_NOT_AVAILABLE.to_string())
+        })?;
+
+        rpc_server
+            .unregister_core_rpc_override(method)
             .await
             .map_err(ModuleError::OperationError)
     }

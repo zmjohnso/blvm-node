@@ -489,6 +489,51 @@ impl NodeAPI for NodeApiIpc {
         }
     }
 
+    async fn register_core_rpc_override(
+        &self,
+        method: String,
+        description: String,
+    ) -> Result<(), ModuleError> {
+        let correlation_id = self.next_correlation_id().await;
+        let request = RequestMessage {
+            correlation_id,
+            request_type: MessageType::RegisterCoreRpcOverride,
+            payload: RequestPayload::RegisterCoreRpcOverride {
+                method,
+                description,
+            },
+        };
+
+        let response = self.ipc_client.lock().await.request(request).await?;
+        if response.success {
+            Ok(())
+        } else {
+            Err(ModuleError::OperationError(response.error.unwrap_or_else(
+                || "Failed to register core RPC override".to_string(),
+            )))
+        }
+    }
+
+    async fn unregister_core_rpc_override(&self, method: &str) -> Result<(), ModuleError> {
+        let correlation_id = self.next_correlation_id().await;
+        let request = RequestMessage {
+            correlation_id,
+            request_type: MessageType::UnregisterCoreRpcOverride,
+            payload: RequestPayload::UnregisterCoreRpcOverride {
+                method: method.to_string(),
+            },
+        };
+
+        let response = self.ipc_client.lock().await.request(request).await?;
+        if response.success {
+            Ok(())
+        } else {
+            Err(ModuleError::OperationError(response.error.unwrap_or_else(
+                || "Failed to unregister core RPC override".to_string(),
+            )))
+        }
+    }
+
     async fn register_timer(
         &self,
         _interval_seconds: u64,

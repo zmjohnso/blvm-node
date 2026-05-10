@@ -18,8 +18,6 @@ use tokio::net::TcpListener;
 use tracing::{debug, error, info, warn, Span};
 use uuid::Uuid;
 
-#[cfg(feature = "miniscript")]
-use super::miniscript::miniscript_rpc;
 #[cfg(feature = "bip70-http")]
 use super::payment;
 use super::{auth, blockchain, control, errors, mempool, mining, network, rawtx};
@@ -50,8 +48,14 @@ pub struct RpcServer {
     auth_manager: Option<Arc<auth::RpcAuthManager>>,
     // Metrics collector (optional, for Prometheus export)
     metrics: Option<Arc<MetricsCollector>>,
-    // Module RPC endpoints (dynamic registration)
-    module_endpoints: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn ModuleRpcHandler>>>>,
+    // Module extension RPC endpoints (dynamic registration).
+    // Value: (module_name, handler) — module_name enables bulk cleanup on unload.
+    module_endpoints:
+        Arc<tokio::sync::RwLock<HashMap<String, (String, Arc<dyn ModuleRpcHandler>)>>>,
+    // Core RPC method overrides: only methods in OVERRIDABLE_CORE_RPC_METHODS may appear here.
+    // Value: (module_name, handler).  Checked BEFORE the core match in handle().
+    rpc_core_overrides:
+        Arc<tokio::sync::RwLock<HashMap<String, (String, Arc<dyn ModuleRpcHandler>)>>>,
     /// Maximum request body size in bytes
     max_request_size: usize,
     /// Connection rate limiter (per-IP connection attempts per minute)
@@ -108,6 +112,7 @@ impl RpcServer {
             auth_manager,
             metrics,
             module_endpoints: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            rpc_core_overrides: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             max_request_size,
             connection_limiter,
             batch_rate_multiplier_cap,
@@ -308,6 +313,7 @@ impl RpcServer {
             auth_manager: self.auth_manager.clone(),
             metrics: self.metrics.clone(),
             module_endpoints: Arc::clone(&self.module_endpoints),
+            rpc_core_overrides: Arc::clone(&self.rpc_core_overrides),
             max_request_size: self.max_request_size,
             connection_limiter: self.connection_limiter.clone(),
             batch_rate_multiplier_cap: self.batch_rate_multiplier_cap,
@@ -1545,19 +1551,24 @@ impl RpcServer {
                     ))
                 }
             }
-            #[cfg(feature = "miniscript")]
-            "getdescriptorinfo" => miniscript_rpc::get_descriptor_info(&params)
-                .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
-            #[cfg(feature = "miniscript")]
-            "analyzepsbt" => miniscript_rpc::analyze_psbt(&params)
-                .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+            "getdescriptorinfo" | "analyzepsbt" => Err(errors::RpcError::new(
+                errors::RpcErrorCode::ServerError(-32001),
+                format!(
+                    "Method '{method}' requires the blvm-miniscript module to be loaded. \
+                     Load it with: loadmodule \"blvm-miniscript\""
+                ),
+            )),
 
             _ => {
-                // Check module endpoints
+                // Check core overrides first, then extension endpoints.
+                {
+                    let overrides = self.rpc_core_overrides.read().await;
+                    if let Some((_, handler)) = overrides.get(method) {
+                        return handler.handle(params).await;
+                    }
+                }
                 let endpoints = self.module_endpoints.read().await;
-                if let Some(handler) = endpoints.get(method) {
+                if let Some((_, handler)) = endpoints.get(method) {
                     handler.handle(params).await
                 } else {
                     Err(errors::RpcError::method_not_found(method))
@@ -1566,47 +1577,149 @@ impl RpcServer {
         }
     }
 
-    /// Register a module RPC endpoint
+    /// Register a module extension RPC endpoint (non-core methods only).
     ///
-    /// # Arguments
-    /// * `method` - RPC method name (must have module prefix, e.g., "lightning_*")
-    /// * `handler` - Handler implementation
-    ///
-    /// # Returns
-    /// * `Ok(())` - Success
-    /// * `Err(String)` - Error (e.g., method name conflicts with core endpoint)
+    /// - Method must NOT be in `CORE_RPC_METHODS`.  Use `register_core_rpc_override` for those.
+    /// - `module_name` is recorded so all endpoints for a module can be cleaned up on unload.
     pub async fn register_module_endpoint(
         &self,
         method: String,
+        module_name: String,
         handler: Arc<dyn ModuleRpcHandler>,
     ) -> Result<(), String> {
-        // Check if method conflicts with core endpoints (see rpc/methods.rs)
         if crate::rpc::methods::CORE_RPC_METHODS.contains(&method.as_str()) {
-            return Err(format!("Cannot override core RPC method: {method}"));
+            return Err(format!(
+                "Cannot register '{method}' as an extension endpoint — it is a core RPC method. \
+                 Use register_core_rpc_override for allowlisted core methods."
+            ));
         }
-
-        // Check module prefix (recommended but not enforced)
         if !method.contains('_') {
             tracing::warn!(
-                "Module RPC method '{}' does not have module prefix (recommended: 'module_method')",
+                "Module RPC method '{}' has no module prefix (recommended: 'module_method')",
                 method
             );
         }
-
         let mut endpoints = self.module_endpoints.write().await;
-        endpoints.insert(method.clone(), handler);
-        tracing::info!("Registered module RPC endpoint: {}", method);
+        endpoints.insert(method.clone(), (module_name.clone(), handler));
+        tracing::info!(
+            "Registered extension RPC endpoint '{}' for module '{}'",
+            method,
+            module_name
+        );
         Ok(())
     }
 
-    /// Unregister a module RPC endpoint
+    /// Unregister a module extension RPC endpoint.
     pub async fn unregister_module_endpoint(&self, method: &str) -> Result<(), String> {
         let mut endpoints = self.module_endpoints.write().await;
-        if endpoints.remove(method).is_some() {
-            tracing::info!("Unregistered module RPC endpoint: {}", method);
+        if let Some((module_name, _)) = endpoints.remove(method) {
+            tracing::info!(
+                "Unregistered extension RPC endpoint '{}' (module: '{}')",
+                method,
+                module_name
+            );
             Ok(())
         } else {
-            Err(format!("Module RPC endpoint not found: {method}"))
+            Err(format!("Extension RPC endpoint '{method}' not found"))
+        }
+    }
+
+    /// Register a core RPC method override for a trusted loaded module.
+    ///
+    /// - `method` must be in `OVERRIDABLE_CORE_RPC_METHODS`.
+    /// - First registration wins; a second module attempting to override the same method is rejected.
+    /// - `module_name` is recorded for bulk cleanup on unload.
+    pub async fn register_core_rpc_override(
+        &self,
+        method: String,
+        module_name: String,
+        handler: Arc<dyn ModuleRpcHandler>,
+    ) -> Result<(), String> {
+        if !crate::rpc::methods::OVERRIDABLE_CORE_RPC_METHODS.contains(&method.as_str()) {
+            return Err(format!(
+                "Method '{method}' is not in OVERRIDABLE_CORE_RPC_METHODS and cannot be overridden by modules"
+            ));
+        }
+        let mut overrides = self.rpc_core_overrides.write().await;
+        if let Some((existing_module, _)) = overrides.get(&method) {
+            tracing::warn!(
+                "Core RPC override for '{}' already held by module '{}'; rejecting claim from '{}'",
+                method,
+                existing_module,
+                module_name
+            );
+            return Err(format!(
+                "Core RPC method '{method}' is already overridden by module '{existing_module}'"
+            ));
+        }
+        overrides.insert(method.clone(), (module_name.clone(), handler));
+        tracing::info!(
+            "Module '{}' registered core RPC override for '{}'",
+            module_name,
+            method
+        );
+        Ok(())
+    }
+
+    /// Unregister a core RPC method override.
+    pub async fn unregister_core_rpc_override(&self, method: &str) -> Result<(), String> {
+        let mut overrides = self.rpc_core_overrides.write().await;
+        if let Some((module_name, _)) = overrides.remove(method) {
+            tracing::info!(
+                "Unregistered core RPC override for '{}' (module: '{}')",
+                method,
+                module_name
+            );
+            Ok(())
+        } else {
+            Err(format!("No core RPC override registered for '{method}'"))
+        }
+    }
+
+    /// Remove ALL extension endpoints and core overrides registered by `module_name`.
+    /// Called by `ModuleManager::unload_module` to prevent dead handlers after module exit.
+    pub async fn unregister_all_for_module(&self, module_name: &str) {
+        let mut removed_ext = 0usize;
+        let mut removed_core = 0usize;
+        {
+            let mut endpoints = self.module_endpoints.write().await;
+            endpoints.retain(|method, (owner, _)| {
+                if owner == module_name {
+                    tracing::debug!(
+                        "Cleaning up extension endpoint '{}' for unloaded module '{}'",
+                        method,
+                        module_name
+                    );
+                    removed_ext += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        {
+            let mut overrides = self.rpc_core_overrides.write().await;
+            overrides.retain(|method, (owner, _)| {
+                if owner == module_name {
+                    tracing::debug!(
+                        "Cleaning up core override '{}' for unloaded module '{}'",
+                        method,
+                        module_name
+                    );
+                    removed_core += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        if removed_ext + removed_core > 0 {
+            tracing::info!(
+                "Cleaned up {} extension + {} core RPC entries for unloaded module '{}'",
+                removed_ext,
+                removed_core,
+                module_name
+            );
         }
     }
 }

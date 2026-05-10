@@ -59,6 +59,11 @@ pub struct ModuleManager {
     /// WASM loader (injected by binary; e.g. from blvm-sdk)
     #[cfg(feature = "wasm-modules")]
     wasm_loader: Option<Arc<dyn WasmModuleLoader>>,
+    /// RPC server reference — used to clean up module-registered endpoints on unload.
+    rpc_server: Option<Arc<crate::rpc::server::RpcServer>>,
+    /// If non-empty, only these module names are auto-loaded (from config `enabled_modules`).
+    /// An empty vec means "load everything discovered".
+    enabled_modules: Vec<String>,
     /// Node IPC socket path (where node listens; modules connect here)
     node_socket_path: Option<PathBuf>,
 }
@@ -182,6 +187,8 @@ impl ModuleManager {
             #[cfg(feature = "wasm-modules")]
             wasm_loader: None,
             node_socket_path: None,
+            rpc_server: None,
+            enabled_modules: Vec::new(),
         }
     }
 
@@ -258,6 +265,38 @@ impl ModuleManager {
     #[cfg(unix)]
     pub fn ipc_server(&self) -> Option<Arc<tokio::sync::Mutex<ModuleIpcServer>>> {
         self.ipc_server.clone()
+    }
+
+    /// Attach the RPC server so `unload_module` can clean up registered endpoints/overrides.
+    pub fn with_rpc_server(&mut self, rpc_server: Arc<crate::rpc::server::RpcServer>) {
+        self.rpc_server = Some(rpc_server);
+    }
+
+    /// Set the list of modules that should be auto-loaded.
+    /// If the list is non-empty, `auto_load_modules` will only load modules whose name appears here.
+    /// An empty list (the default) means load every discovered module.
+    pub fn set_enabled_modules(&mut self, enabled: Vec<String>) {
+        self.enabled_modules = enabled;
+    }
+
+    /// Return a clone of the `api_hub` arc so callers can release the `ModuleManager` lock
+    /// before making async inter-module calls.
+    ///
+    /// Pattern for callers that hold the `ModuleManager` mutex:
+    /// ```ignore
+    /// let hub_arc = {
+    ///     let manager = mgr.lock().await;
+    ///     manager.api_hub_arc()
+    /// }; // mgr lock released here
+    /// if let Some(hub) = hub_arc {
+    ///     let node_api = hub.lock().await.node_api();
+    ///     let resp = node_api.call_module(Some(target), method, params).await?;
+    /// }
+    /// ```
+    pub fn api_hub_arc(
+        &self,
+    ) -> Option<Arc<tokio::sync::Mutex<crate::module::api::hub::ModuleApiHub>>> {
+        self.api_hub.clone()
     }
 
     /// Start the module manager
@@ -492,6 +531,15 @@ impl ModuleManager {
             return Err(ModuleError::OperationError(format!(
                 "Module {module_name} is already loaded"
             )));
+        }
+
+        // Validate rpc_overrides against the allowlist BEFORE spawning the process.
+        for method in &metadata.rpc_overrides {
+            if !crate::rpc::methods::OVERRIDABLE_CORE_RPC_METHODS.contains(&method.as_str()) {
+                return Err(ModuleError::OperationError(format!(
+                    "Module '{module_name}' declares rpc_override '{method}' which is not in OVERRIDABLE_CORE_RPC_METHODS"
+                )));
+            }
         }
 
         // Validate dependencies BEFORE spawning process (hard dependency enforcement)
@@ -777,6 +825,11 @@ impl ModuleManager {
                     .await
                     .unregister_cli_spec_by_name(module_name)
                     .await;
+            }
+
+            // Unregister all RPC extension endpoints and core overrides owned by this module.
+            if let Some(ref rpc_server) = self.rpc_server {
+                rpc_server.unregister_all_for_module(module_name).await;
             }
 
             // Remove from loaded_modules (event manager)
@@ -1258,8 +1311,23 @@ impl ModuleManager {
             // In a full implementation, we'd check dependencies first
         }
 
+        // Apply enabled_modules allowlist: if non-empty, skip modules not in the list.
+        if !self.enabled_modules.is_empty() {
+            let before = discovered_modules.len();
+            discovered_modules.retain(|m| self.enabled_modules.contains(&m.manifest.name));
+            let after = discovered_modules.len();
+            if before != after {
+                info!(
+                    "enabled_modules filter: kept {}/{} discovered modules ({} skipped)",
+                    after,
+                    before,
+                    before - after
+                );
+            }
+        }
+
         if discovered_modules.is_empty() {
-            info!("No modules discovered");
+            info!("No modules to load (0 discovered or all filtered by enabled_modules)");
             return Ok(());
         }
 

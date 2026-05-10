@@ -284,6 +284,10 @@ impl ControlRpc {
     /// Load a module at runtime (hot load)
     ///
     /// Params: ["name"] (module name)
+    ///
+    /// Discovery order:
+    /// 1. Local modules_dir scan.
+    /// 2. If not found locally, ask `blvm-marketplace` to fetch + install it, then retry.
     pub async fn loadmodule(&self, params: &Value) -> RpcResult<Value> {
         let mgr = self
             .module_manager
@@ -292,17 +296,88 @@ impl ControlRpc {
         let name = params.get(0).and_then(|v| v.as_str()).ok_or_else(|| {
             RpcError::invalid_params("loadmodule requires module name".to_string())
         })?;
-        let mut manager = mgr.lock().await;
-        let discovery = ModuleDiscovery::new(manager.modules_dir());
-        let discovered = discovery
-            .discover_module(name)
-            .map_err(|e| RpcError::internal_error(e.to_string()))?;
+
+        // Helper: try local discovery + load.
+        let try_local = |manager: &mut ModuleManager| {
+            let discovery = ModuleDiscovery::new(manager.modules_dir());
+            discovery.discover_module(name)
+        };
+
+        // Phase 1: local discovery.  Hold lock only briefly so we can release before any
+        // async inter-module call (avoids deadlock with ModuleRouter re-acquiring the lock).
+        let (local_result, hub_arc) = {
+            let mut manager = mgr.lock().await;
+            let r = try_local(&mut manager);
+            let h = manager.api_hub_arc();
+            (r, h)
+        };
+
+        let discovered = match local_result {
+            Ok(d) => d,
+            Err(_local_err) => {
+                // Module not found locally — ask marketplace to fetch + install it.
+                // The module_manager lock is already released at this point.
+                debug!(
+                    "Module '{}' not found locally; asking blvm-marketplace to fetch it",
+                    name
+                );
+                let fetch_result: Result<Vec<u8>, crate::module::traits::ModuleError> =
+                    if let Some(hub) = hub_arc {
+                        let node_api = hub.lock().await.node_api();
+                        node_api
+                            .call_module(
+                                Some("blvm-marketplace"),
+                                "fetch_module",
+                                name.as_bytes().to_vec(),
+                            )
+                            .await
+                    } else {
+                        Err(crate::module::traits::ModuleError::OperationError(
+                            "Module API hub not available".to_string(),
+                        ))
+                    };
+
+                match fetch_result {
+                    Ok(resp_bytes) => {
+                        let resp: serde_json::Value =
+                            serde_json::from_slice(&resp_bytes).unwrap_or_default();
+                        if !resp.get("installed").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            let err_msg = resp
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown marketplace error");
+                            return Err(RpcError::internal_error(format!(
+                                "Module '{}' not found locally and marketplace install failed: {}",
+                                name, err_msg
+                            )));
+                        }
+                        // Re-discover after marketplace install.
+                        let mut manager = mgr.lock().await;
+                        try_local(&mut manager).map_err(|e| {
+                            RpcError::internal_error(format!(
+                                "Module '{}' installed by marketplace but still not discoverable: {}",
+                                name, e
+                            ))
+                        })?
+                    }
+                    Err(e) => {
+                        return Err(RpcError::internal_error(format!(
+                            "Module '{}' not found locally and marketplace unavailable: {}",
+                            name, e
+                        )));
+                    }
+                }
+            }
+        };
+
         let config = crate::module::loader::ModuleLoader::load_module_config(
             name,
             discovered.directory.join("config.toml"),
         )
         .map_err(|e| RpcError::internal_error(e.to_string()))?;
-        manager
+
+        mgr.lock()
+            .await
             .load_module(
                 name,
                 &discovered.binary_path,
@@ -311,6 +386,7 @@ impl ControlRpc {
             )
             .await
             .map_err(|e| RpcError::internal_error(e.to_string()))?;
+
         Ok(json!("Module loaded"))
     }
 
