@@ -740,17 +740,7 @@ impl Node {
             Ok(Some(chain_tip)) => {
                 let watermark_val = match self.storage.chain().get_utxo_watermark() {
                     Ok(Some(w)) => w,
-                    Ok(None) => {
-                        if chain_tip > 0 {
-                            warn!(
-                                "[START_COMPONENTS] Missing ibd_utxo_watermark with chain_tip={} — \
-                                 resume baseline is genesis until watermarks persist (expensive replay). \
-                                 Current builds persist ibd_utxo_watermark after each durable flush.",
-                                chain_tip
-                            );
-                        }
-                        0
-                    }
+                    Ok(None) => 0,
                     Err(e) => {
                         warn!(
                             "[START_COMPONENTS] get_utxo_watermark failed ({}); assuming 0",
@@ -807,6 +797,25 @@ impl Node {
                 (0u64, 0u64)
             }
         };
+
+        // One-line resume summary (post-reconcile reads reflect disk). Helps verify we are not
+        // accidentally treating an existing chain as genesis (e.g. wrong --data-dir or BLVM_CLEAN).
+        let chain_tip_for_log = self.storage.chain().get_height().ok().flatten();
+        let wm_for_log = self.storage.chain().get_utxo_watermark().ok().flatten();
+        info!(
+            "[IBD_RESUME] chain_tip={:?} ibd_utxo_watermark={:?} effective_validated_tip={} next_block_height={}",
+            chain_tip_for_log,
+            wm_for_log,
+            synced_tip,
+            ibd_first_block_height
+        );
+        if chain_tip_for_log.is_some_and(|h| h > 0) && synced_tip == 0 {
+            warn!(
+                "[IBD_RESUME] Chain tip is {:?} but durable UTXO watermark is still 0 — validation reconnects from block 1 until the first flush persists `ibd_utxo_watermark`. \
+                 After that, restarts resume at min(chain_tip, watermark). Use the same --data-dir and omit BLVM_CLEAN=1 between runs.",
+                chain_tip_for_log
+            );
+        }
 
         let target_height = match self.network.get_highest_peer_start_height() {
             Some(peer_height) => peer_height.max(synced_tip),
