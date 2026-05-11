@@ -137,6 +137,7 @@ async fn test_bip47_derivation_error_paths() {
         description: None,
         author: None,
         capabilities: vec![],
+        rpc_overrides: vec![],
         dependencies: std::collections::HashMap::new(),
         optional_dependencies: std::collections::HashMap::new(),
         config_schema: std::collections::HashMap::new(),

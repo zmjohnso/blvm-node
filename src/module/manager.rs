@@ -1930,6 +1930,7 @@ mod tests {
             description: String::new(),
             author: String::new(),
             capabilities: vec![],
+            rpc_overrides: vec![],
             dependencies: HashMap::new(),
             optional_dependencies: HashMap::new(),
             entry_point: "fake".to_string(),

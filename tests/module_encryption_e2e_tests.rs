@@ -64,6 +64,7 @@ fn create_test_manifest_with_payment(name: &str) -> ModuleManifest {
         description: Some(format!("Test module: {}", name)),
         author: Some("Test Author".to_string()),
         capabilities: Vec::new(),
+        rpc_overrides: Vec::new(),
         dependencies: HashMap::new(),
         optional_dependencies: HashMap::new(),
         entry_point: format!("{}.so", name),

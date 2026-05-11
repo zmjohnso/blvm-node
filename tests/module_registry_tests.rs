@@ -16,6 +16,7 @@ fn create_test_manifest(name: &str, deps: HashMap<String, String>) -> ModuleMani
         description: Some(format!("Test module {}", name)),
         author: Some("Test Author".to_string()),
         capabilities: Vec::new(),
+        rpc_overrides: Vec::new(),
         dependencies: deps,
         optional_dependencies: HashMap::new(),
         entry_point: format!("{}.so", name),

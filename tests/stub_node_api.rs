@@ -394,4 +394,16 @@ impl NodeAPI for MockNodeAPI {
     async fn submit_block(&self, _block: Block) -> Result<SubmitBlockResult, ModuleError> {
         Ok(SubmitBlockResult::Accepted)
     }
+
+    async fn register_core_rpc_override(
+        &self,
+        _method: String,
+        _description: String,
+    ) -> Result<(), ModuleError> {
+        Ok(())
+    }
+
+    async fn unregister_core_rpc_override(&self, _method: &str) -> Result<(), ModuleError> {
+        Ok(())
+    }
 }

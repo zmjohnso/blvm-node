@@ -11,6 +11,7 @@ fn create_valid_manifest() -> ModuleManifest {
         description: Some("Test module".to_string()),
         author: Some("Test Author".to_string()),
         capabilities: Vec::new(),
+        rpc_overrides: Vec::new(),
         dependencies: HashMap::new(),
         optional_dependencies: HashMap::new(),
         entry_point: "test-module.so".to_string(),

@@ -13,6 +13,7 @@ fn create_test_metadata(name: &str) -> ModuleMetadata {
         description: "Test module".to_string(),
         author: "Test Author".to_string(),
         capabilities: Vec::new(),
+        rpc_overrides: Vec::new(),
         dependencies: HashMap::new(),
         optional_dependencies: HashMap::new(),
         entry_point: format!("{name}.so"),
