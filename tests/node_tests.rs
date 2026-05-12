@@ -54,17 +54,8 @@ async fn test_mempool_manager() {
     assert_eq!(mempool.size(), 0);
     assert!(mempool.transaction_hashes().is_empty());
 
-    // Test adding transaction (simplified)
-    use blvm_protocol::Transaction;
-    let tx = Transaction {
-        version: 1,
-        inputs: blvm_protocol::tx_inputs![],
-        outputs: blvm_protocol::tx_outputs![],
-        lock_time: 0,
-    };
-
-    let result = mempool.add_transaction(tx).unwrap();
-    assert!(result); // Simplified implementation always returns true
+    let result = mempool.add_transaction(valid_transaction()).unwrap();
+    assert!(result);
 }
 
 #[tokio::test]
