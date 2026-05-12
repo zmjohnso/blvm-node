@@ -31,10 +31,6 @@ env:
   CARGO_INCREMENTAL: '0'
   # lld uses far less memory than GNU ld; prevents OOM kills when linking blvm-node in parallel.
   RUSTFLAGS: '-C link-arg=-fuse-ld=lld'
-  # Redirect ALL temp files (rustc scratch, linker temp objects, mktemp) to /mnt/data so
-  # that the /tmp tmpfs (RAM-backed, limited) is never exhausted during large link steps.
-  # Nested under the per-run build dir so it is always in a pre-existing writable subtree.
-  TMPDIR: ${{ github.workspace }}/.build/gh-blvm-node-build/${{ github.run_id }}/tmp
   # Shared target dir for build-dev → test/clippy/docs within the same run.
   # All four jobs run on [self-hosted, Linux, X64, builds] runners that share /mnt/data.
   BLVM_BUILD_TARGET: ${{ github.workspace }}/.build/gh-blvm-node-build/${{ github.run_id }}/target
@@ -78,7 +74,7 @@ jobs:
           # Fuzz artifacts from previous runs
           rm -rf ${{ github.workspace }}/.build/gh-fuzz-blvm-node 2>/dev/null || true
           # Ensure TMPDIR exists (nested inside the per-run build dir — always writable)
-          mkdir -p "${{ github.workspace }}/.build/gh-blvm-node-build/${{ github.run_id }}/tmp"
+          mkdir -p "${{ github.workspace }}/.build/gh-blvm-node-build/${{ github.run_id }}/target"
           echo "=== disk AFTER cleanup ==="
           df -h /
 
@@ -828,7 +824,7 @@ jobs:
           fi
           JOBS=$(nproc)
           echo "Running ${#bins[@]} fuzz targets across $JOBS cores in parallel"
-          RUNSCRIPT=$(mktemp "${{ github.workspace }}/.build/gh-blvm-node-build/${{ github.run_id }}/tmp/fuzz-run-XXXXXX.sh")
+          RUNSCRIPT=$(mktemp /tmp/fuzz-run-XXXXXX.sh)
           cat > "$RUNSCRIPT" << 'SCRIPT'
           #!/usr/bin/env bash
           t=$1
