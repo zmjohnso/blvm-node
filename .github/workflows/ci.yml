@@ -219,6 +219,11 @@ jobs:
           echo "  - Consensus: ${CONSENSUS_CACHE_KEY:0:16}..."
           echo "  - Protocol: ${PROTOCOL_CACHE_KEY:0:16}..."
 
+      # checkout@v4 defaults to git clean -ffdx, which removes ignored .build/ (including paths
+      # created in the emergency step above). Recreate before rustup mktemp under TMPDIR.
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
 
