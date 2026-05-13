@@ -11,9 +11,10 @@ mod tests {
     use blvm_node::module::ipc::server::ModuleIpcServer;
     use blvm_node::module::traits::ModuleError;
     use blvm_node::Hash;
+    use std::path::Path;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{sleep, Duration, Instant};
 
     use super::stub_node_api::MockNodeAPI;
 
@@ -21,6 +22,20 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let socket_path = temp_dir.path().join("test.sock");
         (temp_dir, socket_path)
+    }
+
+    /// Bind can lag behind `tokio::spawn` on loaded CI; fixed sleeps flake.
+    async fn connect_when_ready(socket_path: &Path) -> ModuleIpcClient {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match ModuleIpcClient::connect(socket_path).await {
+                Ok(client) => return client,
+                Err(_) if Instant::now() < deadline => {
+                    sleep(Duration::from_millis(50)).await;
+                }
+                Err(e) => panic!("failed to connect to {socket_path:?}: {e:?}"),
+            }
+        }
     }
 
     #[tokio::test]
@@ -49,18 +64,7 @@ mod tests {
             let _ = server.start(node_api).await;
         });
 
-        // Wait for server to start
-        sleep(Duration::from_millis(100)).await;
-
-        // Connect client
-        let mut client = match ModuleIpcClient::connect(&socket_path).await {
-            Ok(c) => c,
-            Err(_) => {
-                // Server might not be ready yet, wait a bit more
-                sleep(Duration::from_millis(200)).await;
-                ModuleIpcClient::connect(&socket_path).await.unwrap()
-            }
-        };
+        let mut client = connect_when_ready(&socket_path).await;
 
         // Send handshake
         let correlation_id = client.next_correlation_id();
@@ -94,9 +98,7 @@ mod tests {
             let _ = server.start(node_api).await;
         });
 
-        sleep(Duration::from_millis(100)).await;
-
-        let mut client = ModuleIpcClient::connect(&socket_path).await.unwrap();
+        let mut client = connect_when_ready(&socket_path).await;
 
         // Send handshake first
         let handshake_id = client.next_correlation_id();
@@ -130,9 +132,7 @@ mod tests {
             let _ = server.start(node_api).await;
         });
 
-        sleep(Duration::from_millis(100)).await;
-
-        let mut client = ModuleIpcClient::connect(&socket_path).await.unwrap();
+        let mut client = connect_when_ready(&socket_path).await;
 
         // Handshake
         let handshake_id = client.next_correlation_id();
@@ -170,9 +170,7 @@ mod tests {
             let _ = server.start(node_api).await;
         });
 
-        sleep(Duration::from_millis(100)).await;
-
-        let mut client = ModuleIpcClient::connect(&socket_path).await.unwrap();
+        let mut client = connect_when_ready(&socket_path).await;
 
         // Handshake
         let handshake_id = client.next_correlation_id();
@@ -205,9 +203,7 @@ mod tests {
             let _ = server.start(node_api).await;
         });
 
-        sleep(Duration::from_millis(100)).await;
-
-        let mut client = ModuleIpcClient::connect(&socket_path).await.unwrap();
+        let mut client = connect_when_ready(&socket_path).await;
 
         // Handshake
         let handshake_id = client.next_correlation_id();
@@ -222,15 +218,21 @@ mod tests {
         };
         let _ = client.request(handshake).await;
 
-        // Close server
+        // Close server — peer teardown can lag behind `abort` on CI.
         server_handle.abort();
-        sleep(Duration::from_millis(100)).await;
 
-        // Try to send request (should fail)
-        let hash: Hash = [0xcd; 32];
-        let correlation_id = client.next_correlation_id();
-        let request = RequestMessage::get_block(correlation_id, hash);
-        let result = client.request(request).await;
-        assert!(result.is_err());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let hash: Hash = [0xcd; 32];
+                let correlation_id = client.next_correlation_id();
+                let request = RequestMessage::get_block(correlation_id, hash);
+                if client.request(request).await.is_err() {
+                    return;
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("request should fail after server task aborted");
     }
 }
