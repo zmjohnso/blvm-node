@@ -1,6 +1,6 @@
 [package]
 name = "blvm-node"
-version = "0.1.6"
+version = "0.1.8"
 edition = "2021"
 authors = ["Bitcoin Commons Team"]
 description = "Bitcoin Commons BLVM: Minimal Bitcoin node implementation using blvm-protocol and blvm-consensus"
@@ -128,6 +128,11 @@ bitflags = "^2.6"
 # Concurrent HashMap for IBD v2 (zero lock contention); works on all platforms
 dashmap = "=6.0"
 
+# Memory / HTTP helpers: must live in top-level [dependencies] so Windows builds
+# resolve them when default features enable `sysinfo` / `governance` (they are not Unix-only).
+sysinfo = { version = "=0.30", optional = true }
+reqwest = { version = "=0.12", optional = true, features = ["json"] }
+
 # Memory allocator optimization
 # Disabled for Windows cross-compilation (mimalloc linking issues with MinGW)
 [target.'cfg(not(target_os = "windows"))'.dependencies]
@@ -137,12 +142,6 @@ libmimalloc-sys = { version = "=0.1", features = ["extended"], optional = true }
 # System calls for process sandboxing (Unix)
 nix = { version = "=0.28", features = ["process", "resource"], optional = true }
 libc = { version = "=0.2", optional = true }
-
-# System information for memory stats (non-Windows only)
-sysinfo = { version = "=0.30", optional = true }
-
-# HTTP client for governance auto-detect / webhooks (feature `governance` only)
-reqwest = { version = "=0.12", optional = true, features = ["json"] }
 
 # Compression for storage optimization (optional feature)
 zstd = { version = "=0.13", optional = true }
