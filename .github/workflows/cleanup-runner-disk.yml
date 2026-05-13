@@ -25,6 +25,19 @@ jobs:
       - name: Report disk before
         run: df -h /
 
+      - name: Prune old GitHub Actions runner diag logs (often on same volume as _work)
+        run: |
+          DRY="${{ github.event.inputs.dry_run }}"
+          for d in /var/lib/github-runner-*/_diag/pages; do
+            if [ -d "$d" ]; then
+              echo "=== Diag logs in $d (prune *.log older than 3 days) ==="
+              du -sh "$d" 2>/dev/null || true
+              if [ "$DRY" != "true" ]; then
+                find "$d" -type f -name '*.log' -mtime +3 -delete 2>/dev/null || true
+              fi
+            fi
+          done
+
       - name: Remove CI per-run build dirs (same path as ci.yml BLVM_BUILD_TARGET)
         run: |
           DRY="${{ github.event.inputs.dry_run }}"

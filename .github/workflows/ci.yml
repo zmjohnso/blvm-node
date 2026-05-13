@@ -34,6 +34,10 @@ env:
   # Shared target dir for build-dev → test/clippy/docs within the same run.
   # All four jobs run on [self-hosted, Linux, X64, builds] runners that share /mnt/data.
   BLVM_BUILD_TARGET: ${{ github.workspace }}/.build/gh-blvm-node-build/${{ github.run_id }}/target
+  # Keep rustc/link temps on the same volume as target (system /tmp may be small or full).
+  TMPDIR: ${{ github.workspace }}/.build/gh-blvm-node-build/${{ github.run_id }}/tmp
+  TMP: ${{ github.workspace }}/.build/gh-blvm-node-build/${{ github.run_id }}/tmp
+  TEMP: ${{ github.workspace }}/.build/gh-blvm-node-build/${{ github.run_id }}/tmp
 
 jobs:
   setup:
@@ -55,40 +59,57 @@ jobs:
           df -h /
           WORK="${{ github.workspace }}"
           BUILD_ROOT="$WORK/.build/gh-blvm-node-build"
-          # Free space on the filesystem that holds the workspace (avoids full root with /var/lib full)
+          RUN_ID="${{ github.run_id }}"
+          # Free space on the filesystem that holds the workspace
           AVAIL=$(df -B1 "$WORK" 2>/dev/null | tail -1 | awk '{print $4}')
-          # If < 12 GiB free, evict ALL other per-run target dirs immediately (ignore 60‑min grace).
-          MIN_FREE=$((12 * 1024 * 1024 * 1024))
+          # blvm-node test builds need a lot of headroom for rustc temps + deps
+          MIN_FREE=$((28 * 1024 * 1024 * 1024))
+          CRIT_FREE=$((4 * 1024 * 1024 * 1024))
+
+          purge_siblings() {
+            if [ ! -d "$BUILD_ROOT" ]; then
+              return 0
+            fi
+            echo "=== Purging sibling run dirs (keeping $RUN_ID only) ==="
+            find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
+              -not -name "$RUN_ID" \
+              -exec rm -rf {} + 2>/dev/null || true
+          }
+
+          # Critical: disk almost full — drop every other job's tree so this run can proceed.
+          if [ -n "$AVAIL" ] && [ "$AVAIL" -lt "$CRIT_FREE" ]; then
+            echo "⚠️  CRITICAL: $AVAIL bytes free — evicting all sibling per-run trees under $BUILD_ROOT"
+            purge_siblings
+          fi
+
           if [ -n "$AVAIL" ] && [ "$AVAIL" -lt "$MIN_FREE" ]; then
             echo "⚠️  Low disk: $AVAIL bytes free under $WORK — aggressive prune of sibling run dirs"
-            if [ -d "$BUILD_ROOT" ]; then
-              find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
-                -not -name "${{ github.run_id }}" \
-                -exec rm -rf {} + 2>/dev/null || true
-            fi
+            purge_siblings
           fi
-          # Nuke ALL stale run dirs (every dir except a currently-active run on THIS runner).
-          # We can't know other runners' run_ids, so we delete everything older than 1 hour.
-          # The teardown job deletes the current run dir at the end, so at steady-state
-          # nothing should survive here — but we clean defensively on every setup.
+
+          # Time-based stale cleanup (shorter window so abandoned runs don't hoard disk).
           if [ -d "$BUILD_ROOT" ]; then
             find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
-              -not -name "${{ github.run_id }}" \
-              -mmin +60 \
+              -not -name "$RUN_ID" \
+              -mmin +30 \
               -exec rm -rf {} + 2>/dev/null || true
-            # If still >50 GB used by gh-blvm-node-build, evict everything except current run.
             USED=$(du -sb "$BUILD_ROOT" 2>/dev/null | cut -f1 || echo 0)
-            if [ "$USED" -gt 53687091200 ]; then
-              echo "⚠️  gh-blvm-node-build still >50 GB after 1h prune — force-evicting all stale dirs"
-              find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
-                -not -name "${{ github.run_id }}" \
-                -exec rm -rf {} + 2>/dev/null || true
+            # 35 GiB cap on total retained build junk for this repo
+            if [ "$USED" -gt $((35 * 1024 * 1024 * 1024)) ]; then
+              echo "⚠️  gh-blvm-node-build >35 GiB — evicting all dirs except $RUN_ID"
+              purge_siblings
             fi
           fi
-          # Fuzz artifacts from previous runs
+
           rm -rf "$WORK/.build/gh-fuzz-blvm-node" 2>/dev/null || true
-          # Ensure TMPDIR exists (nested inside the per-run build dir — always writable)
-          mkdir -p "$BUILD_ROOT/${{ github.run_id }}/target"
+          mkdir -p "$BUILD_ROOT/$RUN_ID/target" "$BUILD_ROOT/$RUN_ID/tmp"
+
+          AVAIL2=$(df -B1 "$WORK" 2>/dev/null | tail -1 | awk '{print $4}')
+          if [ -n "$AVAIL2" ] && [ "$AVAIL2" -lt "$MIN_FREE" ]; then
+            echo "⚠️  Still low after prune ($AVAIL2 bytes) — second sibling purge"
+            purge_siblings
+          fi
+
           echo "=== disk AFTER cleanup ==="
           df -h /
 
