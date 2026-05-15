@@ -521,11 +521,7 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ env.BLVM_BUILD_TARGET }}
         run: |
-          if ! cargo clippy --version >/dev/null 2>&1; then
-            echo "Skipping Clippy (cargo-clippy not installed for the active toolchain)"
-            exit 0
-          fi
-          cargo clippy --lib --bins -- -D warnings
+          cargo clippy --lib --bins --examples -- -D warnings
           # Integration tests: keep -D warnings but avoid per-test-crate #![allow] spam.
           cargo clippy --tests -- \
             -D warnings \
@@ -700,12 +696,7 @@ jobs:
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
       - name: Check formatting
-        run: |
-          if ! cargo fmt --version >/dev/null 2>&1; then
-            echo "Skipping rustfmt (not installed for the active toolchain)"
-            exit 0
-          fi
-          cargo fmt -- --check
+        run: cargo fmt --all -- --check
 
   docs:
     name: Docs

@@ -35,7 +35,7 @@ fn main() -> anyhow::Result<()> {
     let config_path = "electrum-config.toml";
     config.to_toml_file(std::path::Path::new(config_path))?;
 
-    println!("✓ Configuration created: {}", config_path);
+    println!("✓ Configuration created: {config_path}");
     println!();
     println!("Configuration Summary:");
     println!("  RPC Port: 18332 (testnet)");
@@ -44,7 +44,7 @@ fn main() -> anyhow::Result<()> {
     println!("  P2P Port: 18333");
     println!();
     println!("To start the node with this config:");
-    println!("  blvm-node --config {} --network testnet", config_path);
+    println!("  blvm-node --config {config_path} --network testnet");
     println!();
     println!("Electrum Configuration:");
     println!("  1. Open Electrum");

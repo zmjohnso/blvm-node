@@ -290,7 +290,8 @@ pub fn try_create_module_kv_database<P: AsRef<Path>>(db_path: P) -> Result<Box<d
     let db_path = db_path.as_ref();
 
     #[cfg(all(not(feature = "sled"), not(feature = "tidesdb")))]
-    #[allow(clippy::needless_return)] // Early exit: no trailing `try` impl when both backends are off.
+    #[allow(clippy::needless_return)]
+    // Early exit: no trailing `try` impl when both backends are off.
     {
         return Err(anyhow::anyhow!(
             "No dynamic module KV backend compiled into blvm-node (enable `sled` and/or `tidesdb`)"

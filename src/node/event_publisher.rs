@@ -330,11 +330,7 @@ impl EventPublisher {
     }
 
     /// Publish companion UDP endpoint for a P2P peer (`NODE_FIBRE` / port+1). Modules (e.g. `blvm-fibre`) treat it as a FIBRE UDP target.
-    pub async fn publish_companion_udp_peer_registered(
-        &self,
-        p2p_peer_addr: &str,
-        udp_addr: &str,
-    ) {
+    pub async fn publish_companion_udp_peer_registered(&self, p2p_peer_addr: &str, udp_addr: &str) {
         debug!(
             "Publishing CompanionUdpPeerRegistered: p2p={} udp={}",
             p2p_peer_addr, udp_addr
