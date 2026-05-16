@@ -11,11 +11,8 @@
 # so HTTP bootstrap is compiled in. Config may omit [modules]; defaults pull
 # blvm-miniscript + blvm-zmq and DEFAULT_MODULE_REGISTRY_INDEX_URL.
 #
-# Release model (see each repo's .github/workflows/release.yml):
-#   - GitHub Releases hold versioned assets (vX.Y.Z).
-#   - After each release, CI commits **main**'s module.toml with [downloads.*] URLs
-#     pointing at **that** tag. The node always loads **main** module.toml; it does not
-#     choose among multiple tags client-side.
+# Release model: each official module’s GitHub Release publishes binaries +
+# sha256sums.txt; module.toml on main carries semver only (see blvm-node modules README).
 #
 set -euo pipefail
 

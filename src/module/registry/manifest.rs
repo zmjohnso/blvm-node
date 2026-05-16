@@ -40,11 +40,10 @@ pub struct BinarySection {
     pub size: Option<u64>,
 }
 
-/// Per-platform download entry written by each module's release CI.
-///
-/// Keyed by platform string (e.g. `"x86_64-linux"`, `"aarch64-linux"`,
-/// `"x86_64-apple"`, `"aarch64-apple"`).  The node reads these during
-/// bootstrap install instead of fetching coordinates from a central registry.
+/// Per-platform download entry (**legacy**). Bootstrap installs binaries from
+/// **GitHub Releases** using `registry/modules.json` → `repo`, `module.toml`
+/// `version`, and `sha256sums.txt` on the matching `v{version}` tag; `[downloads]`
+/// in `module.toml` is no longer written or required.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlatformDownload {
     /// Direct download URL for this platform's binary
@@ -189,13 +188,11 @@ pub struct ModuleManifest {
     #[serde(default)]
     pub binary: Option<BinarySection>,
 
-    /// Remote download coordinates per platform (written by release CI).
+    /// **Legacy:** remote download coordinates per platform. Not used for
+    /// bootstrap when installing from the official registry (GitHub Releases +
+    /// `sha256sums.txt` instead).
     ///
-    /// The node reads this section during bootstrap install to obtain the
-    /// correct URL and SHA-256 for the running platform, eliminating the need
-    /// for a central registry to track per-version binary locations.
-    ///
-    /// Keys: `"x86_64-linux"` | `"aarch64-linux"` | `"x86_64-apple"` | `"aarch64-apple"`
+    /// Keys: `"x86_64-linux"` | `"aarch64-linux"` | `"x86_64-windows"` | …
     #[serde(default)]
     pub downloads: HashMap<String, PlatformDownload>,
 

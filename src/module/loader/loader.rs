@@ -24,6 +24,88 @@ impl ModuleLoader {
     ) -> Result<(), ModuleError> {
         info!("Loading module: {}", discovered.manifest.name);
 
+        #[cfg(feature = "governance")]
+        {
+            let is_wasm =
+                discovered.binary_path.extension().and_then(|s| s.to_str()) == Some("wasm");
+
+            if !is_wasm {
+                if let Some(registry_url) = manager.registry_url() {
+                    let client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(60))
+                        .user_agent(concat!("blvm-node/", env!("CARGO_PKG_VERSION")))
+                        .build()
+                        .map_err(|e| ModuleError::op_err("Failed to build HTTP client", e))?;
+
+                    match crate::module::github_release_install::try_fetch_expected_sha_for_native_module(
+                        &client,
+                        registry_url,
+                        &discovered.manifest,
+                    )
+                    .await
+                    {
+                        Ok(expected_sha) => {
+                            let binary_content = tokio::fs::read(&discovered.binary_path)
+                                .await
+                                .map_err(|e| {
+                                    ModuleError::CryptoError(format!("Failed to read binary: {e}"))
+                                })?;
+                            use sha2::{Digest, Sha256};
+                            let actual = hex::encode(Sha256::digest(&binary_content));
+                            if actual != expected_sha {
+                                return Err(ModuleError::OperationError(format!(
+                                    "SHA256 mismatch for module '{}' (GitHub release checksums): expected {} got {}",
+                                    discovered.manifest.name, expected_sha, actual
+                                )));
+                            }
+                            info!(
+                                "Module {} binary verified against GitHub release checksums",
+                                discovered.manifest.name
+                            );
+                        }
+                        Err(e) => {
+                            if let Some(h) = discovered
+                                .manifest
+                                .binary
+                                .as_ref()
+                                .and_then(|b| b.hash.as_ref())
+                            {
+                                Self::verify_stored_binary_hash(
+                                    &discovered.manifest,
+                                    &discovered.binary_path,
+                                    h,
+                                )?;
+                                warn!(
+                                    "Module {}: could not fetch GitHub release checksums ({}); verified against module.toml [binary].hash",
+                                    discovered.manifest.name, e
+                                );
+                            } else {
+                                return Err(e);
+                            }
+                        }
+                    }
+                } else {
+                    Self::verify_manifest_binary_hash_if_present(
+                        &discovered.manifest,
+                        &discovered.binary_path,
+                    )?;
+                }
+            } else {
+                Self::verify_manifest_binary_hash_if_present(
+                    &discovered.manifest,
+                    &discovered.binary_path,
+                )?;
+            }
+        }
+
+        #[cfg(not(feature = "governance"))]
+        {
+            Self::verify_manifest_binary_hash_if_present(
+                &discovered.manifest,
+                &discovered.binary_path,
+            )?;
+        }
+
         // Verify signatures if present
         if discovered.manifest.has_signatures() {
             debug!(
@@ -49,6 +131,39 @@ impl ModuleLoader {
                 config,
             )
             .await
+    }
+
+    /// If the manifest declares `[binary].hash`, ensure the on-disk file matches.
+    fn verify_manifest_binary_hash_if_present(
+        manifest: &crate::module::registry::manifest::ModuleManifest,
+        binary_path: &Path,
+    ) -> Result<(), ModuleError> {
+        if let Some(bin) = &manifest.binary {
+            if let Some(h) = &bin.hash {
+                Self::verify_stored_binary_hash(manifest, binary_path, h)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_stored_binary_hash(
+        manifest: &crate::module::registry::manifest::ModuleManifest,
+        binary_path: &Path,
+        expected_hex: &str,
+    ) -> Result<(), ModuleError> {
+        let binary_content = std::fs::read(binary_path)
+            .map_err(|e| ModuleError::CryptoError(format!("Failed to read binary: {e}")))?;
+        use sha2::{Digest, Sha256};
+        let actual_hash = hex::encode(Sha256::digest(&binary_content));
+        let expected_hash = expected_hex.trim_start_matches("sha256:").to_lowercase();
+        if actual_hash != expected_hash {
+            return Err(ModuleError::CryptoError(format!(
+                "Binary hash mismatch for module {}: expected {}, got {}",
+                manifest.name, expected_hex, actual_hash
+            )));
+        }
+        debug!("Binary hash verified for module {}", manifest.name);
+        Ok(())
     }
 
     /// Verify module signatures (manifest and binary)
@@ -110,15 +225,7 @@ impl ModuleLoader {
 
                 // Verify binary hash if specified
                 if let Some(expected_hash) = &binary_section.hash {
-                    use sha2::{Digest, Sha256};
-                    let actual_hash = hex::encode(Sha256::digest(&binary_content));
-                    if actual_hash != expected_hash.trim_start_matches("sha256:") {
-                        return Err(ModuleError::CryptoError(format!(
-                            "Binary hash mismatch for module {}: expected {}, got {}",
-                            manifest.name, expected_hash, actual_hash
-                        )));
-                    }
-                    debug!("Binary hash verified for module {}", manifest.name);
+                    Self::verify_stored_binary_hash(manifest, binary_path, expected_hash)?;
                 }
 
                 // Verify binary signatures if present

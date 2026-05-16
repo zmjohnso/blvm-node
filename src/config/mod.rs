@@ -83,7 +83,7 @@ fn flatten_toml_to_string_map(value: &toml::Value) -> HashMap<String, String> {
     result
 }
 
-/// GitHub raw URL for the monorepo’s `registry/modules.json` (module name → `module_toml_url`).
+/// GitHub raw URL for the monorepo’s `registry/modules.json` (module name → `repo`; `module.toml` URL is conventional unless overridden).
 pub const DEFAULT_MODULE_REGISTRY_INDEX_URL: &str =
     "https://raw.githubusercontent.com/BTCDecoded/blvm/main/registry/modules.json";
 

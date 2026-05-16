@@ -334,6 +334,11 @@ impl ModuleManager {
         self.registry_url = Some(url);
     }
 
+    /// HTTP URL for the module registry index (`modules.json`), if configured.
+    pub fn registry_url(&self) -> Option<&str> {
+        self.registry_url.as_deref()
+    }
+
     /// Return a clone of the `api_hub` arc so callers can release the `ModuleManager` lock
     /// before making async inter-module calls.
     ///
@@ -1631,17 +1636,16 @@ impl ModuleManager {
 
     /// Download and install a module binary during first-boot bootstrap.
     ///
-    /// # Flow (Option B — self-describing modules)
+    /// # Flow (GitHub Releases — `sha256sums.txt` is source of truth)
     ///
-    /// 1. Fetch `registry_url` (modules.json) → discovery index, get `module_toml_url`.
-    /// 2. Fetch `module_toml_url` → parse as `ModuleManifest` (the module owns this file).
-    /// 3. Read `manifest.downloads[platform]` for the binary URL and SHA-256.
-    /// 4. Download binary, verify SHA-256, write to `modules_dir/<name>/`.
-    /// 5. Write the already-fetched `module.toml` to the same directory.
-    ///
-    /// Binary coordinates and hashes live in each module's own repository and are
-    /// updated by that module's release CI — the central `modules.json` is a static
-    /// address book that never needs to be updated on release.
+    /// 1. Fetch `registry_url` (`modules.json`) → `repo` (`owner/name`); manifest URL is
+    ///    `module_toml_url` if set, else `https://raw.githubusercontent.com/{repo}/{ref}/module.toml`
+    ///    (`ref` defaults to `main`, overridable with `manifest_ref`).
+    /// 2. Fetch `module.toml` → `name`, `version` (no `[downloads]` required).
+    /// 3. Tag `v{version}` → download `sha256sums.txt`, then the platform binary
+    ///    `{name}-{platform}` (`.exe` on Windows) from the same release.
+    /// 4. Verify SHA-256 from the checksums file, install under `modules_dir/<name>/`,
+    ///    write `module.toml`.
     #[cfg(feature = "governance")]
     async fn bootstrap_download_module(
         &self,
@@ -1651,11 +1655,17 @@ impl ModuleManager {
         use crate::module::registry::manifest::ModuleManifest;
         use serde::Deserialize;
 
-        // Minimal discovery-index shape: only name + module_toml_url are required.
+        // Discovery index: required `name` + `repo` (`owner/name`). Manifest location follows a
+        // Cargo.toml-style convention: repo-root `module.toml` on `main`, unless overridden.
         #[derive(Deserialize)]
         struct RegistryEntry {
             name: String,
-            module_toml_url: String,
+            repo: String,
+            #[serde(default)]
+            module_toml_url: Option<String>,
+            /// Branch or tag for the default raw GitHub manifest URL (default `main`).
+            #[serde(default)]
+            manifest_ref: Option<String>,
         }
 
         let client = reqwest::Client::builder()
@@ -1690,15 +1700,35 @@ impl ModuleManager {
         let entries: Vec<RegistryEntry> = serde_json::from_slice(&index_bytes)
             .map_err(|e| ModuleError::op_err("Registry JSON parse failed", e))?;
 
-        let module_toml_url = entries
+        let entry = entries
             .into_iter()
             .find(|e| e.name == name)
-            .map(|e| e.module_toml_url)
             .ok_or_else(|| {
                 ModuleError::OperationError(format!(
                     "Module '{name}' not found in registry at {registry_url}"
                 ))
             })?;
+
+        let github_repo = entry.repo;
+
+        crate::module::github_release_install::validate_github_repo(&github_repo)?;
+
+        use crate::module::github_release_install::{
+            default_module_toml_raw_url, DEFAULT_MODULE_MANIFEST_REF,
+        };
+        let manifest_ref = entry
+            .manifest_ref
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_MODULE_MANIFEST_REF);
+        let module_toml_url = entry
+            .module_toml_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| default_module_toml_raw_url(&github_repo, manifest_ref));
 
         // ── Step 2: fetch module.toml from the module's own repo ─────────────
         info!(
@@ -1711,25 +1741,13 @@ impl ModuleManager {
         let manifest: ModuleManifest = toml::from_str(toml_str)
             .map_err(|e| ModuleError::op_err("Failed to parse module.toml", e))?;
 
-        // ── Step 3: resolve platform binary coordinates ───────────────────────
-        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
-        let platform = "x86_64-linux";
-        #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-        let platform = "aarch64-linux";
-        #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
-        let platform = "x86_64-windows";
-        #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
-        let platform = "x86_64-apple";
-        #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-        let platform = "aarch64-apple";
-        #[cfg(not(any(
-            all(target_arch = "x86_64", target_os = "linux"),
-            all(target_arch = "aarch64", target_os = "linux"),
-            all(target_arch = "x86_64", target_os = "windows"),
-            all(target_arch = "x86_64", target_os = "macos"),
-            all(target_arch = "aarch64", target_os = "macos"),
-        )))]
-        let platform = "unknown";
+        // ── Step 3: platform + release layout (GitHub Releases + sha256sums.txt) ─
+        use crate::module::github_release_install::{
+            artifact_name, fetch_release_checksums_text, host_platform_key, release_download_url,
+            release_tag, sha256_from_checksums,
+        };
+
+        let platform = host_platform_key()?;
 
         // On Windows the installed binary must carry the .exe extension so the
         // OS can execute it via Command::new.
@@ -1738,38 +1756,27 @@ impl ModuleManager {
         #[cfg(not(target_os = "windows"))]
         let binary_filename = name.to_string();
 
-        let download = manifest.downloads.get(platform).ok_or_else(|| {
-            ModuleError::OperationError(format!(
-                "module.toml for '{name}' has no [downloads.{platform}] entry \
-                 (version {})",
-                manifest.version
-            ))
-        })?;
+        let tag = release_tag(&manifest.version);
+        let artifact = artifact_name(name, platform)?;
+        let checksum_text = fetch_release_checksums_text(&client, &github_repo, &tag).await?;
+        let expected_sha = sha256_from_checksums(&checksum_text, &artifact)?;
 
-        // ── Step 4: download and verify binary ───────────────────────────────
+        let binary_url = release_download_url(&github_repo, &tag, &artifact);
         info!(
-            "Bootstrap: downloading '{}' {} for {} from {}",
-            name, manifest.version, platform, download.url
+            "Bootstrap: downloading '{}' {} for {} from GitHub release {} ({})",
+            name, manifest.version, platform, tag, binary_url
         );
-        let binary_bytes = fetch(download.url.clone()).await?;
+        let binary_bytes = fetch(binary_url.clone()).await?;
 
-        if !download.sha256.is_empty() {
-            use sha2::Digest;
-            let actual = hex::encode(sha2::Sha256::digest(&binary_bytes));
-            if actual != download.sha256.to_lowercase() {
-                return Err(ModuleError::OperationError(format!(
-                    "SHA256 mismatch for '{name}' ({platform}): \
-                     expected {} got {actual}",
-                    download.sha256
-                )));
-            }
-            debug!("Bootstrap: SHA256 verified for '{}'", name);
-        } else {
-            warn!(
-                "Bootstrap: no sha256 in module.toml for '{}' ({}) — skipping integrity check",
-                name, platform
-            );
+        use sha2::Digest;
+        let actual = hex::encode(sha2::Sha256::digest(&binary_bytes));
+        if actual != expected_sha {
+            return Err(ModuleError::OperationError(format!(
+                "SHA256 mismatch for '{name}' ({platform}) release artifact {artifact}: \
+                 expected {expected_sha} got {actual}"
+            )));
         }
+        debug!("Bootstrap: SHA256 verified for '{}' via {}", name, tag);
 
         // ── Step 5: write binary + module.toml to modules_dir ────────────────
         let module_dir = self.modules_dir.join(name);
@@ -1795,8 +1802,19 @@ impl ModuleManager {
                 .map_err(|e| ModuleError::op_err("Failed to set executable bit", e))?;
         }
 
-        // Write the manifest we already fetched (no second download needed)
-        tokio::fs::write(module_dir.join("module.toml"), toml_bytes)
+        // Merge `[binary]` (hash + size) into the manifest so load-time checks can use it offline.
+        let mut root: toml::Table = toml::from_str(toml_str)
+            .map_err(|e| ModuleError::op_err("Failed to parse module.toml for install merge", e))?;
+        let size_i64 = i64::try_from(binary_bytes.len()).map_err(|_| {
+            ModuleError::OperationError("Module binary size does not fit i64".to_string())
+        })?;
+        let mut binary_tbl = toml::Table::new();
+        binary_tbl.insert("hash".into(), toml::Value::String(expected_sha.clone()));
+        binary_tbl.insert("size".into(), toml::Value::Integer(size_i64));
+        root.insert("binary".into(), toml::Value::Table(binary_tbl));
+        let toml_out = toml::to_string(&toml::Value::Table(root))
+            .map_err(|e| ModuleError::op_err("Failed to serialize module.toml with [binary]", e))?;
+        tokio::fs::write(module_dir.join("module.toml"), toml_out.as_bytes())
             .await
             .map_err(|e| ModuleError::op_err("Failed to write module.toml", e))?;
 

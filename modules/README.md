@@ -65,7 +65,7 @@ config_key = "Description of this configuration option"
 
 ## Auto-install from registry (bootstrap)
 
-Official modules (`blvm-miniscript`, `blvm-zmq`, …) publish `module.toml` on GitHub with a `[downloads]` table (URLs + SHA-256 per platform). The node can download and install those binaries on first boot when they are listed in **`enabled_modules`** but not yet present under **`modules_dir`**.
+Official modules (`blvm-miniscript`, `blvm-zmq`, …) publish **`module.toml`** on GitHub (identity + semver **`version`** only) and attach **`sha256sums.txt`** plus per-platform binaries to each **GitHub Release** tag `v{version}`. The node downloads the checksum file and the binary for your platform (`{name}-x86_64-linux`, etc.), verifies SHA-256, and installs when they are listed in **`enabled_modules`** but not yet present under **`modules_dir`**.
 
 ### Discovery vs allowlist vs opt-out
 
@@ -78,7 +78,7 @@ Explicit **`loadmodule`** RPC still loads a module by name when invoked; `disabl
 
 Requirements for bootstrap (official binaries):
 
-- **`[modules].registry_url`** should point at a **`modules.json`** discovery index (array of `{ "name", "module_toml_url" }`). The default is **`https://raw.githubusercontent.com/BTCDecoded/blvm/main/registry/modules.json`** (`DEFAULT_MODULE_REGISTRY_INDEX_URL` in `blvm-node` config).
+- **`[modules].registry_url`** should point at a **`modules.json`** discovery index (array of `{ "name", "repo" (owner/repo), optional "module_toml_url", optional "manifest_ref" }`). If `module_toml_url` is omitted, the node fetches **`https://raw.githubusercontent.com/{repo}/{ref}/module.toml`** (`ref` defaults to **`main`**). The default registry URL is **`https://raw.githubusercontent.com/BTCDecoded/blvm/main/registry/modules.json`** (`DEFAULT_MODULE_REGISTRY_INDEX_URL` in `blvm-node` config).
 - **`[modules].enabled_modules`** names each module to install if absent (default: miniscript + zmq).
 
   Example (explicit; same as defaults):

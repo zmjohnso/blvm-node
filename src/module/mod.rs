@@ -14,6 +14,7 @@
 
 pub mod api;
 pub mod encryption;
+pub mod github_release_install;
 pub mod hooks;
 pub mod integration;
 pub mod inter_module;
