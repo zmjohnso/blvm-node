@@ -1169,38 +1169,6 @@ impl EventPublisher {
         }
     }
 
-    /// Publish stratum client connected event
-    pub async fn publish_stratum_client_connected(&self, endpoint: &str, protocol_version: u32) {
-        let payload = EventPayload::StratumClientConnected {
-            endpoint: endpoint.to_string(),
-            protocol_version,
-        };
-
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::StratumClientConnected, payload)
-            .await
-        {
-            warn!("Failed to publish StratumClientConnected event: {}", e);
-        }
-    }
-
-    /// Publish stratum client disconnected event
-    pub async fn publish_stratum_client_disconnected(&self, endpoint: &str, reason: &str) {
-        let payload = EventPayload::StratumClientDisconnected {
-            endpoint: endpoint.to_string(),
-            reason: reason.to_string(),
-        };
-
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::StratumClientDisconnected, payload)
-            .await
-        {
-            warn!("Failed to publish StratumClientDisconnected event: {}", e);
-        }
-    }
-
     /// Publish IBD block filtered event
     pub async fn publish_ibd_block_filtered(&self, block_hash: &Hash, height: u64, reason: &str) {
         let payload = EventPayload::IBDBlockFiltered {

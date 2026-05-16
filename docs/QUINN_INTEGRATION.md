@@ -40,13 +40,9 @@ let manager = NetworkManager::with_transport_preference(
 );
 ```
 
-### Stratum V2 Mining
+### Stratum V2 (module)
 
-```rust
-// Connect to mining pool via Quinn
-let client = StratumV2Client::new("quinn://pool.example.com:3333".to_string());
-client.connect().await?;
-```
+Mining pool / Stratum V2 transport lives in the **`blvm-stratum-v2`** module (configure **`pool_url`** / **`listen_addr`** there, or via `NodeAPI` transport helpers). The node no longer ships an in-process `StratumV2Client` stub here.
 
 ## Transport Comparison
 
@@ -91,15 +87,13 @@ Comprehensive test coverage includes:
    - NetworkManager with Quinn
    - Address conversions
 
-2. **Quinn Transport Tests** (`tests/integration/quinn_transport_tests.rs`)
+2. **Quinn Transport Tests** (`tests/quinn_transport_tests.rs`)
    - Transport type verification
    - Listen/accept functionality
    - Address validation
    - Connection structure
 
-3. **Stratum V2 Tests** (`tests/integration/stratum_v2_quinn_tests.rs`)
-   - URL parsing
-   - Multiple transport URL formats
+Stratum / pool URL integration with QUIC or other transports is covered in **`blvm-stratum-v2`** (module config and `NodeAPI` paths), not in `blvm-node` integration tests.
 
 ## Configuration
 

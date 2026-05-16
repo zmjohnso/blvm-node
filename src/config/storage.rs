@@ -92,7 +92,6 @@ pub struct PruningConfig {
     #[cfg(feature = "utxo-commitments")]
     pub utxo_commitments: Option<UtxoCommitmentsPruningConfig>,
 
-    #[cfg(feature = "bip158")]
     pub bip158_filters: Option<Bip158PruningConfig>,
 }
 
@@ -139,7 +138,6 @@ impl Default for PruningConfig {
             min_blocks_for_incremental_prune: 288,
             #[cfg(feature = "utxo-commitments")]
             utxo_commitments: None,
-            #[cfg(feature = "bip158")]
             bip158_filters: None,
         }
     }
@@ -230,7 +228,6 @@ impl Default for UtxoCommitmentsPruningConfig {
     }
 }
 
-#[cfg(feature = "bip158")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bip158PruningConfig {
     #[serde(default = "default_true")]
@@ -241,12 +238,10 @@ pub struct Bip158PruningConfig {
     pub max_filter_age_days: u32,
 }
 
-#[cfg(feature = "bip158")]
 fn default_filter_max_age() -> u32 {
     0
 }
 
-#[cfg(feature = "bip158")]
 impl Default for Bip158PruningConfig {
     fn default() -> Self {
         Self {

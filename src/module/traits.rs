@@ -432,12 +432,14 @@ pub trait NodeAPI: Send + Sync {
         packet_data: Vec<u8>,
     ) -> Result<(), ModuleError>;
 
-    /// Send Stratum V2 message to peer (miner)
-    /// This allows the Stratum V2 module to send messages to miners
-    async fn send_stratum_v2_message_to_peer(
+    /// Send an **opaque payload** to a network peer (transport address string; see `send_to_peer` / `send_to_peer_by_transport`).
+    ///
+    /// Used by Stratum V2 (TLV on P2P) and any module that needs raw bytes to a `SocketAddr` or `tcp:`/`quinn:`/`iroh:` address.
+    /// Dedicated miner TCP is owned by **`blvm-stratum-v2`**; this path is P2P and similar transports.
+    async fn send_peer_transport_payload(
         &self,
         peer_addr: String,
-        message_data: Vec<u8>,
+        payload: Vec<u8>,
     ) -> Result<(), ModuleError>;
 
     // === Module Health & Monitoring ===

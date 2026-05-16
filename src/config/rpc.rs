@@ -192,6 +192,7 @@ impl RpcAuthConfig {
 pub struct StratumV2Config {
     pub enabled: bool,
     pub pool_url: Option<String>,
+    /// Informational / merge-mining; **dedicated miner TCP is served by `blvm-stratum-v2`**, not the node.
     pub listen_addr: Option<SocketAddr>,
     pub transport_preference: crate::config::TransportPreferenceConfig,
     pub merge_mining_enabled: bool,
@@ -246,5 +247,17 @@ impl Default for MergeMiningFeeConfig {
             contributor_id: None,
             auto_distribute: false,
         }
+    }
+}
+
+#[cfg(all(test, feature = "stratum-v2"))]
+mod stratum_v2_config_tests {
+    use super::StratumV2Config;
+
+    #[test]
+    fn stratum_v2_config_default_disabled() {
+        let c = StratumV2Config::default();
+        assert!(!c.enabled);
+        assert!(c.listen_addr.is_none());
     }
 }

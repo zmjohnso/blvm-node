@@ -7,7 +7,6 @@
 //! - Custom: Fine-grained control over what to keep
 
 use crate::config::{PruningConfig, PruningMode};
-#[cfg(feature = "bip158")]
 use crate::network::filter_service::BlockFilterService;
 use crate::storage::blockstore::BlockStore;
 #[cfg(feature = "utxo-commitments")]
@@ -45,7 +44,6 @@ pub struct PruningManager {
     commitment_store: Option<Arc<CommitmentStore>>,
     #[cfg(feature = "utxo-commitments")]
     utxostore: Option<Arc<UtxoStore>>,
-    #[cfg(feature = "bip158")]
     filter_service: Option<Arc<BlockFilterService>>,
     stats: std::sync::Mutex<PruningStats>,
 }
@@ -60,7 +58,6 @@ impl PruningManager {
             commitment_store: None,
             #[cfg(feature = "utxo-commitments")]
             utxostore: None,
-            #[cfg(feature = "bip158")]
             filter_service: None,
             stats: std::sync::Mutex::new(PruningStats::default()),
         }
@@ -79,7 +76,6 @@ impl PruningManager {
             blockstore,
             commitment_store: Some(commitment_store),
             utxostore: Some(utxostore),
-            #[cfg(feature = "bip158")]
             filter_service: None,
             stats: std::sync::Mutex::new(PruningStats::default()),
         }
@@ -91,7 +87,7 @@ impl PruningManager {
         blockstore: Arc<BlockStore>,
         #[cfg(feature = "utxo-commitments")] commitment_store: Option<Arc<CommitmentStore>>,
         #[cfg(feature = "utxo-commitments")] utxostore: Option<Arc<UtxoStore>>,
-        #[cfg(feature = "bip158")] filter_service: Option<Arc<BlockFilterService>>,
+        filter_service: Option<Arc<BlockFilterService>>,
     ) -> Self {
         Self {
             config,
@@ -100,7 +96,6 @@ impl PruningManager {
             commitment_store,
             #[cfg(feature = "utxo-commitments")]
             utxostore,
-            #[cfg(feature = "bip158")]
             filter_service,
             stats: std::sync::Mutex::new(PruningStats::default()),
         }
@@ -471,7 +466,6 @@ impl PruningManager {
                 }
 
                 // Handle BIP158 filters if configured
-                #[cfg(feature = "bip158")]
                 if let Some(ref filter_service) = self.filter_service {
                     // Remove filter from cache but keep filter header
                     if filter_service.has_filter(&hash) {
@@ -555,7 +549,6 @@ impl PruningManager {
                     }
                 }
                 // Handle BIP158 filters if enabled
-                #[cfg(feature = "bip158")]
                 if keep_filters {
                     if let Some(ref filter_service) = self.filter_service {
                         // Remove filter from cache (saves memory) but keep filter header
@@ -568,11 +561,6 @@ impl PruningManager {
                             );
                         }
                     }
-                }
-                #[cfg(not(feature = "bip158"))]
-                {
-                    // Suppress unused variable warning when feature is disabled
-                    let _ = keep_filters;
                 }
 
                 // Handle filtered blocks if enabled

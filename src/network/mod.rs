@@ -61,10 +61,8 @@ pub mod bip70_handler;
 pub mod dandelion; // Dandelion++ privacy-preserving transaction relay
 pub mod package_relay; // BIP 331 Package Relay
 pub mod package_relay_handler; // BIP 331 handlers
-#[cfg(feature = "stratum-v2")]
-pub mod stratum_v2;
-#[cfg(feature = "stratum-v2")]
-pub(crate) mod stratum_v2_listener;
+// Stratum V2: P2P TLV demux → `StratumV2MessageReceived`; dedicated miner TCP is owned by
+// `blvm-stratum-v2`. `NodeAPI::send_peer_transport_payload` sends opaque bytes on P2P.
 pub mod txhash; // Non-consensus hashing helpers for relay
 
 use std::net::SocketAddr;

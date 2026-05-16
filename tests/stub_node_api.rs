@@ -291,7 +291,7 @@ impl NodeAPI for MockNodeAPI {
         Ok(())
     }
 
-    async fn send_stratum_v2_message_to_peer(
+    async fn send_peer_transport_payload(
         &self,
         _peer_addr: String,
         _message_data: Vec<u8>,

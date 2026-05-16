@@ -1231,7 +1231,7 @@ impl ModuleIpcServer {
                 message_data,
             } => {
                 node_api
-                    .send_stratum_v2_message_to_peer(peer_addr.clone(), message_data.clone())
+                    .send_peer_transport_payload(peer_addr.clone(), message_data.clone())
                     .await?;
                 Ok(ResponseMessage::success(
                     request.correlation_id,

@@ -462,7 +462,7 @@ impl ModuleApiHub {
                 message_data,
             } => {
                 self.node_api
-                    .send_stratum_v2_message_to_peer(peer_addr.clone(), message_data.clone())
+                    .send_peer_transport_payload(peer_addr.clone(), message_data.clone())
                     .await?;
                 ResponsePayload::Bool(true)
             }
@@ -690,7 +690,7 @@ impl ModuleApiHub {
             RequestPayload::ReportModuleHealth { .. } => "report_module_health",
             // Network Integration
             RequestPayload::SendMeshPacketToPeer { .. } => "send_mesh_packet_to_peer",
-            RequestPayload::SendStratumV2MessageToPeer { .. } => "send_stratum_v2_message_to_peer",
+            RequestPayload::SendStratumV2MessageToPeer { .. } => "send_peer_transport_payload",
             RequestPayload::RegisterCliSpec { .. } => "register_cli_spec",
         }
     }

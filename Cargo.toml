@@ -1,6 +1,6 @@
 [package]
 name = "blvm-node"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2021"
 authors = ["Bitcoin Commons Team"]
 description = "Bitcoin Commons BLVM: Minimal Bitcoin node implementation using blvm-protocol and blvm-consensus"
@@ -184,8 +184,6 @@ iroh = ["dep:iroh"]
 quinn = ["dep:quinn", "dep:rcgen", "dep:rustls"]
 utxo-commitments = ["blvm-protocol/utxo-commitments"]
 stratum-v2 = []
-# Block filtering (BIP158)
-bip158 = []
 # Signature operations counting
 sigop = []
 # System information for memory stats (sysinfo is always included)

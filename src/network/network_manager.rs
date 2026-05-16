@@ -249,11 +249,6 @@ pub struct NetworkManager {
     /// Peer reconnection queue (exponential backoff)
     /// Maps SocketAddr to (attempts, last_attempt_timestamp, quality_score)
     peer_reconnection_queue: Arc<Mutex<HashMap<SocketAddr, (u32, u64, f64)>>>,
-    /// Stratum V2 connections (miners on dedicated port 3333)
-    /// Maps peer SocketAddr to channel for sending responses
-    #[cfg(feature = "stratum-v2")]
-    stratum_connections:
-        Arc<tokio::sync::RwLock<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>>,
     /// Block hashes modules merged into the full-block serve denylist (see `merge_block_serve_denylist`).
     block_serve_denylist: Arc<parking_lot::RwLock<HashSet<blvm_protocol::Hash>>>,
     /// Txids merged into the full-tx serve denylist (see `merge_tx_serve_denylist`).
@@ -480,8 +475,6 @@ impl NetworkManager {
             protocol_limits,
             background_task_config,
             peer_reconnection_queue: Arc::new(Mutex::new(HashMap::new())),
-            #[cfg(feature = "stratum-v2")]
-            stratum_connections: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             block_serve_denylist: Arc::new(parking_lot::RwLock::new(HashSet::new())),
             tx_serve_denylist: Arc::new(parking_lot::RwLock::new(HashSet::new())),
             block_serve_maintenance: Arc::new(AtomicBool::new(false)),
@@ -1316,21 +1309,6 @@ impl NetworkManager {
         } else {
             Err(anyhow::anyhow!("No reliable peers available"))
         }
-    }
-
-    /// Send Stratum V2 message to peer. Checks stratum_connections first (port 3333),
-    /// then falls back to P2P peer manager (port 8333).
-    #[cfg(feature = "stratum-v2")]
-    pub async fn send_stratum_v2_to_peer(&self, addr: SocketAddr, message: Vec<u8>) -> Result<()> {
-        let conns = self.stratum_connections.read().await;
-        if let Some(send_tx) = conns.get(&addr) {
-            send_tx
-                .send(message)
-                .map_err(|e| anyhow::anyhow!("Stratum V2 send failed for {}: {}", addr, e))?;
-            return Ok(());
-        }
-        drop(conns);
-        self.send_to_peer(addr, message).await
     }
 
     /// Send a message to a specific peer (by SocketAddr - for TCP/Quinn)
@@ -2422,13 +2400,6 @@ impl NetworkManager {
         &self,
     ) -> &Arc<tokio::sync::Mutex<Option<Arc<crate::node::event_publisher::EventPublisher>>>> {
         &self.event_publisher
-    }
-
-    #[cfg(feature = "stratum-v2")]
-    pub(crate) fn stratum_connections(
-        &self,
-    ) -> &Arc<tokio::sync::RwLock<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>> {
-        &self.stratum_connections
     }
 
     #[cfg(feature = "governance")]

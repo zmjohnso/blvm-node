@@ -492,28 +492,6 @@ impl Node {
             info!("[START_COMPONENTS] network.start() completed successfully");
         }
 
-        // Start Stratum V2 listener on dedicated port when configured
-        #[cfg(feature = "stratum-v2")]
-        if let Some(ref stratum_config) = self.config_sub(|c| c.stratum_v2.as_ref()) {
-            if stratum_config.enabled {
-                if let Some(addr) = stratum_config.listen_addr {
-                    if let Err(e) = crate::network::stratum_v2_listener::start_stratum_v2_listener(
-                        std::sync::Arc::clone(&self.network),
-                        addr,
-                    )
-                    .await
-                    {
-                        warn!(
-                            "[START_COMPONENTS] Failed to start Stratum V2 listener on {}: {}",
-                            addr, e
-                        );
-                    } else {
-                        info!("[START_COMPONENTS] Stratum V2 listener started on {}", addr);
-                    }
-                }
-            }
-        }
-
         // Initialize peer connections automatically
         info!("[START_COMPONENTS] Initializing peer connections...");
         self.initialize_peer_connections().await?;

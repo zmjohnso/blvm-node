@@ -865,7 +865,7 @@ impl NodeAPI for NodeApiIpc {
         .await
     }
 
-    async fn send_stratum_v2_message_to_peer(
+    async fn send_peer_transport_payload(
         &self,
         peer_addr: String,
         message_data: Vec<u8>,
@@ -881,7 +881,7 @@ impl NodeAPI for NodeApiIpc {
                         Ok(())
                     } else {
                         Err(ModuleError::OperationError(
-                            "Failed to send Stratum V2 message".to_string(),
+                            "Failed to send peer transport payload".to_string(),
                         ))
                     }
                 }

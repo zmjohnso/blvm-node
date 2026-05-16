@@ -125,6 +125,7 @@ pub enum MessageType {
     ReportModuleHealth,
     // Network Integration
     SendMeshPacketToPeer,
+    /// Opaque bytes to a peer (`NodeAPI::send_peer_transport_payload`); wire name kept for IPC compatibility.
     SendStratumV2MessageToPeer,
     // Mining API
     GetBlockTemplate,
@@ -316,6 +317,7 @@ pub enum RequestPayload {
         peer_addr: String,
         packet_data: Vec<u8>,
     },
+    /// See [`MessageType::SendStratumV2MessageToPeer`].
     SendStratumV2MessageToPeer {
         peer_addr: String,
         message_data: Vec<u8>,

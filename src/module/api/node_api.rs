@@ -1684,7 +1684,7 @@ impl NodeAPI for NodeApiImpl {
         Ok(())
     }
 
-    async fn send_stratum_v2_message_to_peer(
+    async fn send_peer_transport_payload(
         &self,
         peer_addr: String,
         message_data: Vec<u8>,
@@ -1696,16 +1696,10 @@ impl NodeAPI for NodeApiImpl {
         // Parse peer address (can be SocketAddr string or TransportAddr)
         // Try parsing as SocketAddr first
         if let Ok(socket_addr) = peer_addr.parse::<std::net::SocketAddr>() {
-            // Send via SocketAddr (checks stratum_connections first, then P2P peers)
-            #[cfg(feature = "stratum-v2")]
-            let result = network_manager
-                .send_stratum_v2_to_peer(socket_addr, message_data)
-                .await;
-            #[cfg(not(feature = "stratum-v2"))]
-            let result = network_manager
+            network_manager
                 .send_to_peer(socket_addr, message_data)
-                .await;
-            result.map_err(|e| ModuleError::op_err("Failed to send Stratum V2 message", e))?;
+                .await
+                .map_err(|e| ModuleError::op_err("Failed to send peer transport payload", e))?;
         } else {
             // Try parsing as TransportAddr (format: "tcp:127.0.0.1:8333" or "iroh:...")
             use crate::network::transport::TransportAddr;
@@ -1756,7 +1750,7 @@ impl NodeAPI for NodeApiImpl {
             network_manager
                 .send_to_peer_by_transport(transport_addr, message_data)
                 .await
-                .map_err(|e| ModuleError::op_err("Failed to send Stratum V2 message", e))?;
+                .map_err(|e| ModuleError::op_err("Failed to send peer transport payload", e))?;
         }
 
         Ok(())

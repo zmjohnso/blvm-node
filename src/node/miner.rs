@@ -428,9 +428,6 @@ pub struct MiningCoordinator {
     mempool: std::sync::Arc<crate::node::mempool::MempoolManager>,
     /// Storage for UTXO set access
     storage: Option<std::sync::Arc<crate::storage::Storage>>,
-    /// Stratum V2 client (optional)
-    #[cfg(feature = "stratum-v2")]
-    stratum_v2_client: Option<crate::network::stratum_v2::client::StratumV2Client>,
 }
 
 impl MiningCoordinator {
@@ -444,8 +441,6 @@ impl MiningCoordinator {
             transaction_selector: TransactionSelector::new(),
             mempool,
             storage,
-            #[cfg(feature = "stratum-v2")]
-            stratum_v2_client: None,
         }
     }
 
@@ -467,26 +462,7 @@ impl MiningCoordinator {
             ),
             mempool,
             storage,
-            #[cfg(feature = "stratum-v2")]
-            stratum_v2_client: None,
         }
-    }
-
-    /// Set Stratum V2 client
-    #[cfg(feature = "stratum-v2")]
-    pub fn set_stratum_v2_client(
-        &mut self,
-        client: crate::network::stratum_v2::client::StratumV2Client,
-    ) {
-        self.stratum_v2_client = Some(client);
-    }
-
-    /// Get Stratum V2 client (if enabled)
-    #[cfg(feature = "stratum-v2")]
-    pub fn stratum_v2_client(
-        &self,
-    ) -> Option<&crate::network::stratum_v2::client::StratumV2Client> {
-        self.stratum_v2_client.as_ref()
     }
 
     /// Start the mining coordinator
