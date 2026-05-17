@@ -36,6 +36,10 @@ env:
   # so github.workspace and this default path stay off root — then BLVM_RUNNER_BUILD_ROOT is optional.
   # If workspace is still on a small volume, set repository (or org) variable BLVM_RUNNER_BUILD_ROOT
   # to an absolute path on a large disk — CI, teardown, and cleanup-runner-disk.yml use it.
+  #
+  # Isolation: BLVM_RUNNER_BUILD_ROOT must designate space used only for blvm-node CI on this host.
+  # Emergency disk steps remove sibling per-run directories under BLVM_RUNNER_DATA_ROOT; pointing this
+  # at a parent directory shared with unrelated workflows risks deleting other jobs' build trees.
   BLVM_RUNNER_DATA_ROOT: ${{ vars.BLVM_RUNNER_BUILD_ROOT || format('{0}/.build/gh-blvm-node-build', github.workspace) }}
   BLVM_BUILD_TARGET: ${{ format('{0}/{1}/target', vars.BLVM_RUNNER_BUILD_ROOT || format('{0}/.build/gh-blvm-node-build', github.workspace), github.run_id) }}
   # Keep rustc/link temps on the same volume as target (system /tmp may be small or full).

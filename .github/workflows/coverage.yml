@@ -45,7 +45,7 @@ jobs:
       
       - name: Cache
         run: |
-          CACHE_ROOT="/tmp/runner-cache"
+          CACHE_ROOT="${{ github.workspace }}/.build/runner-cache"
           
           # Cache key from Cargo.toml + toolchain (this checkout does not commit root Cargo.lock per .gitignore).
           DEPS_KEY=$(sha256sum Cargo.toml | cut -d' ' -f1)
