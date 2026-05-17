@@ -51,11 +51,11 @@ fn test_module_subprocess_database_backend_preference() {
     };
     assert_eq!(
         module_subprocess_database_backend_preference(DatabaseBackend::RocksDB, None),
-        "rocksdb"
+        "sled"
     );
     assert_eq!(
         module_subprocess_database_backend_preference(DatabaseBackend::Redb, None),
-        "redb"
+        "sled"
     );
     assert_eq!(
         module_subprocess_database_backend_preference(DatabaseBackend::Sled, None),
@@ -71,7 +71,7 @@ fn test_module_subprocess_database_backend_preference() {
     );
     assert_eq!(
         module_subprocess_database_backend_preference(DatabaseBackend::RocksDB, Some("auto")),
-        "rocksdb"
+        "sled"
     );
     assert_eq!(
         module_subprocess_database_backend_preference(DatabaseBackend::TidesDB, Some("auto")),

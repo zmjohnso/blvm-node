@@ -231,12 +231,13 @@ pub struct ModuleConfig {
     #[serde(default)]
     pub registry_url: Option<String>,
 
-    /// Default storage engine for **module subprocess** databases (`{module_data}/db/`), as a string
-    /// matching `[storage] database_backend` (`sled`, `tidesdb`, `redb`, `rocksdb`, `auto`).
+    /// Default storage engine hint for **module subprocess** KV (`{module_data}/db/`), passed as
+    /// `database_backend` / `MODULE_CONFIG_DATABASE_BACKEND`. Must be a backend that supports
+    /// dynamic `open_tree()` (**sled**, **tidesdb**); **rocksdb** / **redb** from the chain store are
+    /// not forwarded unchanged (see `module_subprocess_database_backend_preference`).
     ///
-    /// When unset, matches the node's resolved `[storage] database_backend`. Module `ModuleDb` may
-    /// still use a different engine at runtime when the chain backend does not support dynamic
-    /// `open_tree()` (see `module_subprocess_database_backend_preference` + SDK `open_module_db`).
+    /// When unset, the node picks **sled** for RocksDB/Redb chains and **tidesdb** when the chain
+    /// uses TidesDB. Set **`auto`** for the same mapping.
     #[serde(default)]
     pub module_database_backend: Option<String>,
 

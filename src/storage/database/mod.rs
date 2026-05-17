@@ -164,12 +164,11 @@ pub enum DatabaseBackend {
 
 /// String passed to module subprocesses as `MODULE_CONFIG_DATABASE_BACKEND` / `database_backend` merge key.
 ///
-/// By default this is the **same backend name as the node's resolved chain store** so configuration
-/// stays uniform. Note: generic module `ModuleDb` / `open_module_db` needs dynamic `open_tree()`;
-/// **RocksDB** and **Redb** in this codebase do not support arbitrary tree names for that API, so
-/// module binaries usually enable **Sled** or **TidesDB** on `blvm-node` and/or set
-/// [`ModuleConfig::module_database_backend`](crate::config::ModuleConfig::module_database_backend)
-/// so the SDK can fall back correctly.
+/// Generic module `ModuleDb` / [`open_module_db`](blvm_sdk::module::database::open_module_db) needs
+/// dynamic `open_tree()` — only **Sled** and **TidesDB** qualify. The node's **RocksDB / Redb** chain
+/// backend must **not** be forwarded as-is (older `blvm-sdk` builds could mis-handle it). Defaults:
+/// **sled** when the chain uses RocksDB or Redb, **tidesdb** when the chain uses TidesDB, **sled**
+/// when the chain uses Sled. Override with [`ModuleConfig::module_database_backend`](crate::config::ModuleConfig::module_database_backend).
 pub fn module_subprocess_database_backend_preference(
     chain_backend: DatabaseBackend,
     modules_table_override: Option<&str>,
@@ -178,20 +177,20 @@ pub fn module_subprocess_database_backend_preference(
         let t = raw.trim();
         if !t.is_empty() {
             if t.eq_ignore_ascii_case("auto") {
-                return module_db_backend_derived_from_chain(chain_backend);
+                return module_subprocess_kv_backend_default(chain_backend);
             }
             return t.to_string();
         }
     }
-    module_db_backend_derived_from_chain(chain_backend)
+    module_subprocess_kv_backend_default(chain_backend)
 }
 
-fn module_db_backend_derived_from_chain(chain_backend: DatabaseBackend) -> String {
+/// Default backend for module-process KV (`open_module_db`): dynamic `open_tree` only.
+fn module_subprocess_kv_backend_default(chain_backend: DatabaseBackend) -> String {
     match chain_backend {
-        DatabaseBackend::Sled => "sled".to_string(),
         DatabaseBackend::TidesDB => "tidesdb".to_string(),
-        DatabaseBackend::RocksDB => "rocksdb".to_string(),
-        DatabaseBackend::Redb => "redb".to_string(),
+        DatabaseBackend::Sled => "sled".to_string(),
+        DatabaseBackend::RocksDB | DatabaseBackend::Redb => "sled".to_string(),
     }
 }
 

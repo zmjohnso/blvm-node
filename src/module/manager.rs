@@ -1991,13 +1991,13 @@ mod tests {
         let temp = std::env::temp_dir().join("blvm_module_test");
         std::fs::create_dir_all(&temp).unwrap();
         let manager = ModuleManager::new(&temp, &temp, &temp);
-        manager.set_default_database_backend("rocksdb".to_string());
+        manager.set_default_database_backend("sled".to_string());
 
         let merged = manager.test_merge_module_config("my-module", HashMap::new());
         assert_eq!(
             merged.get("database_backend"),
-            Some(&"rocksdb".to_string()),
-            "module should inherit node's database_backend when not set"
+            Some(&"sled".to_string()),
+            "module should inherit effective subprocess KV backend when not set"
         );
     }
 
