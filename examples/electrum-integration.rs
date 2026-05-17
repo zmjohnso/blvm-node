@@ -22,7 +22,7 @@ fn main() -> anyhow::Result<()> {
     config.max_outbound_peers = Some(8);
 
     // RPC configuration
-    // Note: RPC port is set via command line (--rpc-port) or defaults
+    // RPC bind address is chosen when starting the node (e.g. blvm --rpc-addr 127.0.0.1:18332)
     // RPC auth is optional - configure in generated config.toml if needed
     config.rpc_auth = Some(blvm_node::config::RpcAuthConfig {
         required: false, // No auth required for localhost
@@ -43,8 +43,8 @@ fn main() -> anyhow::Result<()> {
     println!("  Network: testnet3");
     println!("  P2P Port: 18333");
     println!();
-    println!("To start the node with this config:");
-    println!("  blvm-node --config {config_path} --network testnet");
+    println!("To start the node with this config (operator binary is `blvm`, not `blvm-node`):");
+    println!("  blvm --config {config_path} --network testnet --rpc-addr 127.0.0.1:18332");
     println!();
     println!("Electrum Configuration:");
     println!("  1. Open Electrum");

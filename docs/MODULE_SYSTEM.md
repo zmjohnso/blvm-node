@@ -291,7 +291,7 @@ The manifest is organized into logical sections:
 
 ## Module Storage
 
-Each module has its **own separate database** at `data/modules/<name>/db/`. By default, modules use the **same database format** as the node (redb, rocksdb, sled, tidesdb). Configurable via `database_backend` in module config or `[modules.<name>]`; when not set, inherits from the node.
+Each module has its **own separate database** at `data/modules/<name>/db/`. By default, modules align with the node’s backend choice (**`auto` → RocksDB** in typical release builds). Supported backends include **rocksdb**, **redb**, **sled**, and **tidesdb**. Configurable via `database_backend` in module config or `[modules.<name>]`; when not set, inheritance follows `module_subprocess_database_backend_preference` and related merge rules.
 
 ## Config Override
 

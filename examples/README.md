@@ -19,7 +19,7 @@ cargo run --example electrum-integration
 # Generates electrum-config.toml
 
 # Then start node with:
-blvm-node --config electrum-config.toml --network testnet
+blvm --config electrum-config.toml --network testnet --rpc-addr 127.0.0.1:18332
 ```
 
 **Output**: `electrum-config.toml` file ready to use
@@ -43,7 +43,7 @@ cargo run --example wallet-integration
 **Output**: Prints example RPC requests and integration checklist
 
 **Note**: This shows the request format. To test with a running node:
-1. Start node: `blvm-node --network testnet`
+1. Start node: `blvm --network testnet --rpc-addr 127.0.0.1:18332` (add `--listen-addr` / `--config` as needed)
 2. Use curl or HTTP client to send requests
 3. Or use blvm-sdk for Rust integration
 
@@ -210,7 +210,7 @@ cargo run --example rpc-batch
 
 2. **Start node**:
    ```bash
-   blvm-node --config electrum-config.toml --network testnet
+   blvm --config electrum-config.toml --network testnet --rpc-addr 127.0.0.1:18332
    ```
 
 3. **Configure Electrum**:

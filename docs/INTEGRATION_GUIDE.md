@@ -19,9 +19,9 @@ This guide shows how to integrate blvm-node with existing Bitcoin tools and serv
 
 ### Quick Start
 
-1. **Start blvm-node**:
+1. **Start the node** (operator binary is **`blvm`**, not `blvm-node`):
    ```bash
-   blvm-node --network testnet --rpc-bind 127.0.0.1 --rpc-port 18332
+   blvm --network testnet --listen-addr 127.0.0.1:18333 --rpc-addr 127.0.0.1:18332
    ```
 
 2. **Configure Electrum**:
@@ -129,18 +129,24 @@ See `examples/wallet-integration.rs` for a complete example.
 
 ### Configuration
 
+`blvm.toml` uses **`NodeConfig`** (no `[network]` table). **RPC bind address** is set when starting the **`blvm`** binary (`--rpc-addr` / `BLVM_RPC_ADDR`). **`[rpc_auth]`** carries token / certificate auth and rate limits — not `port`, `bind`, or `username` / `password` (see [`RpcAuthConfig`](https://github.com/BTCDecoded/blvm-node/blob/main/src/config/rpc.rs)).
+
 ```toml
-# config.toml
-[network]
-protocol_version = "bitcoin-v1"  # Mainnet
+listen_addr = "0.0.0.0:8333"
+protocol_version = "BitcoinV1"
+max_peers = 100
+transport_preference = "tcponly"
 
 [rpc_auth]
-port = 8332
-bind = "127.0.0.1"
-# Add authentication for production
-username = "exchange_user"
-password = "secure_password"
-allowed_ips = ["127.0.0.1", "10.0.0.0/8"]  # Internal network
+required = true
+# Production: use RPC_AUTH_TOKENS or token_file instead of committing secrets here
+tokens = []
+rate_limit_burst = 100
+rate_limit_rate = 10
+```
+
+```bash
+blvm --config /path/to/blvm.toml --network mainnet --rpc-addr 127.0.0.1:8332
 ```
 
 ### High Availability
@@ -166,17 +172,21 @@ See `docs/HIGH_AVAILABILITY.md` for details.
 
 ### Configuration
 
+Same schema as [Exchange](#configuration): set **`listen_addr` / `protocol_version` / `[rpc_auth]`** in `blvm.toml`. For pool infrastructure exposing JSON-RPC beyond localhost, pass **`--rpc-addr 0.0.0.0:8332`** (or the address your pool uses) to **`blvm`**. Restrict access with **`[rpc_auth]`** tokens and firewall rules. **Bitcoin Core** options such as **`rpcallowip`** / **`rpcwhitelist`** in **`bitcoin.conf`** are not `RpcAuthConfig` fields — use host firewall or reverse-proxy policy (and BLVM token auth).
+
 ```toml
-# config.toml
-[network]
-protocol_version = "bitcoin-v1"  # Mainnet
+listen_addr = "0.0.0.0:8333"
+protocol_version = "BitcoinV1"
+max_peers = 100
+transport_preference = "tcponly"
 
 [rpc_auth]
-port = 8332
-bind = "0.0.0.0"  # Allow pool connections
-username = "pool_user"
-password = "secure_password"
-allowed_ips = ["10.0.0.0/8"]  # Pool network
+required = true
+tokens = []
+```
+
+```bash
+blvm --config /path/to/blvm.toml --network mainnet --rpc-addr 0.0.0.0:8332
 ```
 
 ### Integration Steps
@@ -216,36 +226,54 @@ allowed_ips = ["10.0.0.0/8"]  # Pool network
 ### Configuration
 
 ```toml
-# config.toml
-[network]
-protocol_version = "bitcoin-v1"  # Mainnet
+listen_addr = "127.0.0.1:8333"
+protocol_version = "BitcoinV1"
+transport_preference = "tcponly"
 
 [rpc_auth]
-port = 8332
-bind = "127.0.0.1"
-# No authentication needed for local access
+required = false
+```
+
+```bash
+blvm --config /path/to/blvm.toml --network mainnet --rpc-addr 127.0.0.1:8332
 ```
 
 ---
 
 ## Migrating from `bitcoin.conf`
 
-### Automatic Conversion
+**Scope:** **`bitcoin.conf`** is the **Bitcoin Core** configuration format. **BLVM never loads it natively** — use a converter to draft **`blvm.toml`**, then run **`blvm --config … --rpc-addr …`**.
 
-Use the provided tool to convert a reference `bitcoin.conf`:
+**RPC auth:** Core’s **`rpcuser`** / **`rpcpassword`** do **not** map 1:1 into BLVM. **`[rpc_auth]`** uses **tokens** (and optional certificate fingerprints), with **`Authorization: Bearer &lt;token&gt;`** on JSON-RPC. Plan a new secret (e.g. `openssl rand -hex 32`) or **`RPC_AUTH_TOKENS`**, not copy-paste of Core’s password alone unless you intentionally reuse that string as a single token.
+
+### Automatic conversion
+
+From the **`blvm-node`** repo root (where `Cargo.toml` defines the binary), or using the **`blvm`** CLI:
 
 ```bash
-# Shell script
-./tools/convert-bitcoin-core-config.sh ~/.bitcoin/bitcoin.conf
+# Shell helper — writes to second argument; output must be normalized (see below)
+./tools/convert-bitcoin-core-config.sh ~/.bitcoin/bitcoin.conf generated-blvm.toml
 
-# Rust tool (more features)
-cargo run --bin convert-bitcoin-core-config -- ~/.bitcoin/bitcoin.conf
+cargo run --bin convert-bitcoin-core-config -- ~/.bitcoin/bitcoin.conf generated-blvm.toml
+
+blvm config convert-core ~/.bitcoin/bitcoin.conf blvm.toml
 ```
 
-### Manual Conversion
+Review the output and **normalize to real `NodeConfig` TOML**:
 
-**Reference `bitcoin.conf` layout**:
+- Remove any **`[network]`** wrapper — use **top-level** `listen_addr`, `protocol_version`, `max_peers`, etc.
+- **Do not** keep **`username` / `password` / `port` / `bind` / `allowed_ips` under `[rpc_auth]`** — **`RpcAuthConfig`** only supports **`tokens`**, **`token_file`**, **`certificates`**, and rate limits. Map Core **`rpcpassword`** (or a new secret) to **`tokens = ["…"]`** and use **`blvm --rpc-addr`** for bind. Core **`rpcallowip`** is not representable here.
+- Replace nested **`[transport_preference]`** with **`transport_preference = "tcponly"`** (or another valid serde variant).
+- Ensure **`[network_timing]`** uses keys **`blvm-node`** accepts (e.g. **`target_peer_count`** for outbound target).
+
+**Prefer** `blvm config convert-core` plus the edits above; the older **shell** `convert-bitcoin-core-config.sh` has the same class of legacy output and is **not** a drop-in config.
+
+### Manual conversion (side-by-side)
+
+**Bitcoin Core only** — illustrative `bitcoin.conf` (INI-style):
+
 ```ini
+# ~/.bitcoin/bitcoin.conf  (Bitcoin Core — not read by BLVM)
 testnet=1
 rpcport=18332
 rpcuser=myuser
@@ -254,24 +282,29 @@ maxconnections=8
 addnode=1.2.3.4
 ```
 
-**blvm-node** (`config.toml`):
+**BLVM `blvm.toml`** (`NodeConfig`):
+
 ```toml
-[network]
-protocol_version = "testnet3"
+protocol_version = "Testnet3"
 max_peers = 8
 persistent_peers = ["1.2.3.4:18333"]
+transport_preference = "tcponly"
 
 [rpc_auth]
-port = 18332
-username = "myuser"
-password = "mypassword"
+required = true
+tokens = ["replace-with-long-random-token"]  # or token_file / RPC_AUTH_TOKENS
 ```
 
-### Important Notes
+```bash
+blvm --config blvm.toml --network testnet --rpc-addr 127.0.0.1:18332
+```
 
-- **Data directories are NOT converted** - configure separately
-- Some upstream options may not have direct equivalents
-- Review generated config and adjust as needed
+### Important notes
+
+- **Data directories** are **not** converted — set **`[storage].data_dir`** (or **`BLVM_DATA_DIR`**) yourself.
+- **P2P port** on `addnode=` peers must match **their** listening port (e.g. testnet **18333**, not the RPC port).
+- Many Core options have **no** BLVM equivalent; treat converter output as a **starting point**.
+- **`blvm config convert-core`** / the standalone tools may emit a **`[network]`**-style stub for compatibility — **`NodeConfig`** uses **top-level** keys; merge or edit to match [current `NodeConfig` serde](https://github.com/BTCDecoded/blvm-node/blob/main/src/config/mod.rs).
 
 ---
 
@@ -280,8 +313,8 @@ password = "mypassword"
 ### Quick Test
 
 ```bash
-# Start node
-blvm-node --network testnet
+# Start node (operator binary)
+blvm --network testnet --rpc-addr 127.0.0.1:18332
 
 # Test RPC
 curl -X POST http://127.0.0.1:18332 \

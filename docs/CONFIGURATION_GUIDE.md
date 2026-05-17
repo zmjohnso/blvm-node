@@ -56,29 +56,32 @@ mempool_persistence_path = "data/mempool.dat"
 
 ## Network Configuration
 
+`NodeConfig` has **no** `[network]` table. Use top-level keys (and optional `[network_timing]`, etc.):
+
 ```toml
-[network]
+listen_addr = "0.0.0.0:8333"
 max_peers = 100
-bind_address = "0.0.0.0:8333"
-external_address = "your.external.ip:8333"
+protocol_version = "BitcoinV1"
+transport_preference = "tcponly"
+enable_self_advertisement = true
 ```
+
+Advertising an **external** reachable address for inbound peers is **not** a single `external_address` field in current `NodeConfig` — use **`enable_self_advertisement`**, **`persistent_peers`**, and operational discovery (DNS, `addnode`-style peers) as appropriate. **JSON-RPC listen** is set by the **`blvm`** process (`--rpc-addr` / `BLVM_RPC_ADDR`), not a `bind_address` key in this file.
 
 ## Storage Configuration
 
 ```toml
 [storage]
 data_dir = "data"
-database_backend = "rocksdb"  # or "redb", "tidesdb", "sled", "auto"
-enable_pruning = false
-enable_indexing = false
+database_backend = "auto"  # typical `blvm` build: RocksDB; or force "rocksdb" | "redb" | "tidesdb" | "sled"
 ```
 
 Database backend options:
-- **rocksdb** (default): High-performance, common on-disk layouts; strong IBD performance
-- **redb**: Embedded ACID database
-- **tidesdb**: LSM-tree store; requires TidesDB C library
-- **sled**: Embedded key-value store
-- **auto**: Use default (rocksdb if available, else redb)
+- **auto** (config default): **RocksDB** when the `rocksdb` feature is enabled (standard release builds), else TidesDB, Redb, Sled — see `default_backend()` in `blvm-node`
+- **rocksdb**: High-performance; common on-disk layout interop
+- **redb**: Pure-Rust embedded ACID database (common in minimal / no-RocksDB builds)
+- **tidesdb**: LSM-tree store; requires TidesDB feature
+- **sled**: Embedded key-value store (fallback tier)
 
 ### Advanced Indexing
 
@@ -98,19 +101,29 @@ Node config can override module settings via `[modules.<name>]` (e.g. `[modules.
 
 ```toml
 [modules.selective-sync]
-database_backend = "redb"  # Override module default; inherit from node when omitted
+database_backend = "redb"  # Example override; omit to inherit node / module_subprocess preference
 ```
 
-## RPC Configuration
+## RPC configuration
+
+**RPC listen address** is determined by the **`blvm`** binary (`--rpc-addr` and `BLVM_RPC_ADDR`), not by a `bind_address` field in the config file.
+
+The optional **`[rpc]`** table configures **limits and rate limits** on the JSON-RPC server:
 
 ```toml
 [rpc]
-bind_address = "127.0.0.1:8332"
-enable_auth = false
-rate_limit_burst = 100
-rate_limit_rate = 10
-rest_api_addr = "127.0.0.1:8080"  # Optional, requires rest-api feature
+max_request_size_bytes = 1048576
+rate_limit_when_auth_disabled = true
+ip_rate_limit_burst = 50
+ip_rate_limit_rate = 5
+max_connections_per_ip_per_minute = 10
+batch_rate_multiplier_cap = 10
+connection_rate_limit_window_seconds = 60
 ```
+
+**Authentication and token rate limits** use **`[rpc_auth]`** (documented in the **blvm-docs** configuration reference).
+
+Optional **`rest_api`** / QUIC RPC are separate features; see node docs for `RestApiConfig` / `quinn` when enabled.
 
 ## Example Configurations
 

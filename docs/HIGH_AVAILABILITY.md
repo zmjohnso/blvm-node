@@ -126,88 +126,57 @@ curl http://localhost:18332/metrics
 
 ## Disk Space Monitoring
 
-### Automatic Pruning
+Blockchain storage growth is handled primarily via **`[storage.pruning]`** (see [`PruningConfig`](https://github.com/BTCDecoded/blvm-node/blob/main/src/config/storage.rs)). There is **no** `pruning_threshold_gb` / `pruning_target_gb` on `StorageConfig` in this tree.
 
-blvm-node monitors disk space and automatically prunes old blocks when space is low.
+**Example (normal pruning)**:
 
-**Configuration**:
 ```toml
 [storage]
-pruning_mode = "normal"  # or "aggressive", "custom", "disabled"
-pruning_threshold_gb = 100  # Prune when disk usage exceeds this
-pruning_target_gb = 80      # Prune down to this size
+data_dir = "/var/lib/blvm"
+database_backend = "auto"
+
+[storage.pruning]
+mode = { type = "normal", keep_from_height = 0, min_recent_blocks = 288 }
+auto_prune = true
+min_blocks_to_keep = 144
 ```
 
-**Pruning Modes**:
-- `disabled`: No automatic pruning
-- `normal`: Prune old blocks, keep recent blocks
-- `aggressive`: Prune aggressively, keep only recent blocks
-- `custom`: Custom pruning configuration
-
-**Behavior**:
-- Monitors disk space periodically
-- Triggers pruning when threshold exceeded
-- Prunes to target size
-- Logs pruning operations
+**Behavior**: Depends on pruning mode (Normal / Aggressive / Disabled / Custom); see blvm-docs pruning section and feature gates such as **`utxo-commitments`** for aggressive paths.
 
 ---
 
 ## Peer Reconnection
 
-### Automatic Reconnection
+The node runs periodic background work including **peer reconnection** intervals (see [`BackgroundTaskConfig`](https://github.com/BTCDecoded/blvm-node/blob/main/src/config/ibd.rs) on `NodeConfig`).
 
-blvm-node automatically reconnects to disconnected peers with exponential backoff.
+**Configurable interval** (optional):
 
-**Features**:
-- Exponential backoff: Reconnection attempts with increasing delays
-- Quality-based prioritization: Reconnect to high-quality peers first
-- Connection queue: Manages reconnection queue
-- Max retries: Limits reconnection attempts
-
-**Configuration**:
 ```toml
-[network]
-reconnect_enabled = true
-reconnect_max_retries = 10
-reconnect_initial_delay_secs = 5
-reconnect_max_delay_secs = 3600
+[background_tasks]
+peer_reconnection_interval_secs = 10
 ```
 
-**Behavior**:
-- Detects peer disconnections
-- Adds peer to reconnection queue
-- Attempts reconnection with exponential backoff
-- Prioritizes high-quality peers
-- Stops after max retries
+There is **no** `[network] reconnect_*` block in `NodeConfig`; reconnection policy is implemented inside the network stack, not via those placeholder keys.
 
 ---
 
 ## Rate Limiting
 
-### Enhanced Rate Limiting
+RPC rate limits use **`[rpc]`** (IP / connection limits when auth is off) and **`[rpc_auth]`** (token-bucket burst/rate). There is **no** `[rpc.auth]` or `per_method_limits` table in `NodeConfig`.
 
-blvm-node implements multi-layer rate limiting for RPC requests.
-
-**Layers**:
-1. **Per-IP Rate Limiting**: Limits requests per IP address
-2. **Per-User Rate Limiting**: Limits requests per authenticated user
-3. **Per-Method Rate Limiting**: Limits requests per RPC method
-
-**Configuration**:
 ```toml
-[rpc.auth]
-rate_limit_enabled = true
-rate_limit_rate = 100      # Requests per second
-rate_limit_burst = 200     # Burst capacity
-per_method_limits = {      # Per-method overrides
-  "getblocktemplate" = { rate = 10, burst = 20 }
-  "sendrawtransaction" = { rate = 5, burst = 10 }
-}
+[rpc]
+rate_limit_when_auth_disabled = true
+ip_rate_limit_burst = 50
+ip_rate_limit_rate = 5
+max_connections_per_ip_per_minute = 10
+
+[rpc_auth]
+rate_limit_burst = 100
+rate_limit_rate = 10
 ```
 
-**Rate Limiter**: Token bucket algorithm
-
-**Response**: `429 Too Many Requests` when limit exceeded
+See [`RpcConfig`](https://github.com/BTCDecoded/blvm-node/blob/main/src/config/rpc.rs) and [`RpcAuthConfig`](https://github.com/BTCDecoded/blvm-node/blob/main/src/config/rpc.rs).
 
 ---
 
@@ -228,44 +197,49 @@ blvm-node uses structured logging with request IDs and tracing spans.
 [2025-01-01T00:00:00Z INFO rpc_request] request_id=abc12345 method=getblockhash client_addr=127.0.0.1:12345 request_size=123
 ```
 
-**Configuration**:
+**Configuration** ([`LoggingConfig`](https://github.com/BTCDecoded/blvm-node/blob/main/src/config/mod.rs)):
+
 ```toml
 [logging]
-format = "json"  # or "text"
-level = "info"   # trace, debug, info, warn, error
+filter = "info"   # or use key alias: level = "info"
+json_format = true
 ```
 
 ---
 
 ## Configuration
 
-### Complete HA Configuration
+### Example: knobs that exist on `NodeConfig`
 
 ```toml
-[network]
-reconnect_enabled = true
-reconnect_max_retries = 10
-reconnect_initial_delay_secs = 5
-reconnect_max_delay_secs = 3600
+listen_addr = "0.0.0.0:8333"
+max_peers = 100
+transport_preference = "tcponly"
+
+[background_tasks]
+peer_reconnection_interval_secs = 10
 
 [storage]
-pruning_mode = "normal"
-pruning_threshold_gb = 100
-pruning_target_gb = 80
+data_dir = "/var/lib/blvm"
+database_backend = "auto"
 
+[storage.pruning]
+mode = { type = "normal", keep_from_height = 0, min_recent_blocks = 288 }
+ 
 [rpc]
-metrics_enabled = true
-health_checks_enabled = true
+ip_rate_limit_burst = 50
+ip_rate_limit_rate = 5
 
-[rpc.auth]
-rate_limit_enabled = true
-rate_limit_rate = 100
-rate_limit_burst = 200
+[rpc_auth]
+rate_limit_burst = 100
+rate_limit_rate = 10
 
 [logging]
-format = "json"
-level = "info"
+filter = "info"
+json_format = true
 ```
+
+Metrics and `/health*` paths depend on the running **`blvm`** / RPC stack build (feature set). Treat endpoint availability as **implementation-defined** and verify against your binary.
 
 ---
 
