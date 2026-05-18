@@ -235,7 +235,7 @@ fn height_granular_protection_no_lost_utxos() {
 
         // 6) Invariant: every unspent UTXO must be findable via supplement.
         // This drives the SAME path validation workers use.
-        let keys: Vec<OutPointKey> = alive.keys().map(|op| outpoint_to_key(op)).collect();
+        let keys: Vec<OutPointKey> = alive.keys().map(outpoint_to_key).collect();
         let mut buf: Vec<OutPointKey> = Vec::new();
         let mut map: UtxoSet = UtxoSet::default();
         store.supplement_utxo_map_with_buf(&mut map, &keys, &mut buf);
@@ -284,15 +284,14 @@ fn height_granular_protection_no_lost_utxos() {
         store.release_protected_heights(&heights);
     }
 
-    let keys: Vec<OutPointKey> = alive.keys().map(|op| outpoint_to_key(op)).collect();
+    let keys: Vec<OutPointKey> = alive.keys().map(outpoint_to_key).collect();
     let mut buf: Vec<OutPointKey> = Vec::new();
     let mut map: UtxoSet = UtxoSet::default();
     store.supplement_utxo_map_with_buf(&mut map, &keys, &mut buf);
     let post_flush_missing = alive.keys().filter(|op| !map.contains_key(*op)).count();
     assert_eq!(
         post_flush_missing, 0,
-        "post-final-flush: {} unspent UTXOs unreachable",
-        post_flush_missing
+        "post-final-flush: {post_flush_missing} unspent UTXOs unreachable"
     );
 }
 

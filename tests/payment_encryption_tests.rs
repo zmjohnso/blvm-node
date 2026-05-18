@@ -6,11 +6,11 @@ mod common;
 
 use blvm_node::config::PaymentConfig;
 use blvm_node::module::encryption::{load_encrypted_module, ModuleEncryption};
-use blvm_node::module::registry::client::{ModuleEntry, ModuleRegistry};
+use blvm_node::module::registry::client::ModuleRegistry;
 use blvm_node::module::registry::manifest::{ModuleManifest, PaymentSection};
-use blvm_node::payment::processor::{PaymentError, PaymentProcessor};
+use blvm_node::payment::processor::PaymentProcessor;
 use blvm_protocol::address::{BitcoinAddress, Network};
-use blvm_protocol::payment::{Payment, PaymentRequest};
+use blvm_protocol::payment::Payment;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,7 +31,7 @@ fn create_test_manifest_with_payment(name: &str) -> ModuleManifest {
     let (author_addr, commons_addr) = test_payment_tb1_addresses();
     let price_sats = 100000u64;
 
-    let message_data = format!("{}||{}||{}", author_addr, commons_addr, price_sats);
+    let message_data = format!("{author_addr}||{commons_addr}||{price_sats}");
     let message_hash: [u8; 32] = Sha256::digest(message_data.as_bytes()).into();
     let (signature_hex, pubkey_hex) =
         common::ecdsa_compact_sig_hex_and_pubkey_hex(&test_key, &message_hash);
@@ -58,13 +58,13 @@ fn create_test_manifest_with_payment(name: &str) -> ModuleManifest {
     ModuleManifest {
         name: name.to_string(),
         version: "1.0.0".to_string(),
-        description: Some(format!("Test module: {}", name)),
+        description: Some(format!("Test module: {name}")),
         author: Some("Test Author".to_string()),
         capabilities: Vec::new(),
         rpc_overrides: Vec::new(),
         dependencies: HashMap::new(),
         optional_dependencies: HashMap::new(),
-        entry_point: format!("{}.so", name),
+        entry_point: format!("{name}.so"),
         config_schema: HashMap::new(),
         binary: None,
         downloads: HashMap::new(),
@@ -113,7 +113,7 @@ async fn create_test_registry_with_module(
         binary_hash,
         verified_at: 0,
         verified_by: Vec::new(),
-        local_path: temp_dir.path().join(format!("{}.so", module_name)),
+        local_path: temp_dir.path().join(format!("{module_name}.so")),
         expires_at: None,
     };
     cache.write().await.cache(cached);

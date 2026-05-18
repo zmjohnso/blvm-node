@@ -1,7 +1,7 @@
 //! Stress tests for storage operations (concurrent writes, high load)
 
 use blvm_node::storage::Storage;
-use blvm_node::{Block, BlockHeader, Hash};
+use blvm_node::{Block, BlockHeader};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -34,7 +34,7 @@ async fn test_storage_concurrent_block_writes() {
     let blockstore = storage.blocks();
 
     // Create multiple blocks
-    let blocks: Vec<_> = (0..100).map(|i| create_test_block(i)).collect();
+    let blocks: Vec<_> = (0..100).map(create_test_block).collect();
 
     // Write blocks concurrently
     let mut handles = vec![];

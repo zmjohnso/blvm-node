@@ -22,19 +22,19 @@ fn test_calculate_transaction_fee() {
 
         is_coinbase: false,
     };
-    utxo_set.insert(outpoint.clone(), utxo.into());
+    utxo_set.insert(outpoint, utxo.into());
 
     // Create transaction with 1 input and 1 output
     let tx = Transaction {
         version: 1,
         inputs: blvm_protocol::tx_inputs![blvm_protocol::TransactionInput {
-            prevout: outpoint.clone(),
+            prevout: outpoint,
             script_sig: vec![],
             sequence: 0xffffffff,
         }],
         outputs: blvm_protocol::tx_outputs![blvm_protocol::TransactionOutput {
             value: 99_000_000, // 0.99 BTC (0.01 BTC fee)
-            script_pubkey: vec![0x76, 0xa9, 0x14].into(),
+            script_pubkey: vec![0x76, 0xa9, 0x14],
         }],
         lock_time: 0,
     };
@@ -61,19 +61,19 @@ fn test_calculate_transaction_fee_zero_fee() {
 
         is_coinbase: false,
     };
-    utxo_set.insert(outpoint.clone(), utxo.into());
+    utxo_set.insert(outpoint, utxo.into());
 
     // Transaction with same input and output (no fee)
     let tx = Transaction {
         version: 1,
         inputs: blvm_protocol::tx_inputs![blvm_protocol::TransactionInput {
-            prevout: outpoint.clone(),
+            prevout: outpoint,
             script_sig: vec![],
             sequence: 0xffffffff,
         }],
         outputs: blvm_protocol::tx_outputs![blvm_protocol::TransactionOutput {
             value: 100_000_000,
-            script_pubkey: vec![].into(),
+            script_pubkey: vec![],
         }],
         lock_time: 0,
     };
@@ -102,7 +102,7 @@ fn test_calculate_transaction_fee_missing_utxo() {
         }],
         outputs: blvm_protocol::tx_outputs![blvm_protocol::TransactionOutput {
             value: 50_000_000,
-            script_pubkey: vec![].into(),
+            script_pubkey: vec![],
         }],
         lock_time: 0,
     };

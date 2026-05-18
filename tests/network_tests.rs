@@ -32,7 +32,7 @@ async fn test_peer_creation() {
 
     // Connect to the listener
     let stream = tokio::net::TcpStream::connect(local_addr).await.unwrap();
-    let peer = Peer::new(stream, addr, tx);
+    let peer = Peer::from_tcp_stream_split(stream, addr, tx, MAX_PROTOCOL_MESSAGE_LENGTH);
 
     assert_eq!(peer.address(), addr);
     assert!(peer.is_connected());
@@ -49,7 +49,7 @@ async fn test_peer_send_message() {
 
     // Connect to the listener
     let stream = tokio::net::TcpStream::connect(local_addr).await.unwrap();
-    let peer = Peer::new(stream, addr, tx);
+    let peer = Peer::from_tcp_stream_split(stream, addr, tx, MAX_PROTOCOL_MESSAGE_LENGTH);
 
     // Test sending a message (should queue it via channel)
     let test_message = b"test message".to_vec();
@@ -146,7 +146,7 @@ async fn test_peer_state_transitions() {
     let local_addr = listener.local_addr().unwrap();
     let stream = tokio::net::TcpStream::connect(local_addr).await.unwrap();
 
-    let peer = Peer::new(stream, addr, tx);
+    let peer = Peer::from_tcp_stream_split(stream, addr, tx, MAX_PROTOCOL_MESSAGE_LENGTH);
 
     // Test initial state
     assert!(peer.is_connected());
@@ -167,7 +167,7 @@ async fn test_peer_address_handling() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_addr = listener.local_addr().unwrap();
     let stream = tokio::net::TcpStream::connect(local_addr).await.unwrap();
-    let peer_v4 = Peer::new(stream, addr_v4, tx);
+    let peer_v4 = Peer::from_tcp_stream_split(stream, addr_v4, tx, MAX_PROTOCOL_MESSAGE_LENGTH);
     assert_eq!(peer_v4.address(), addr_v4);
 
     // Test IPv6 address
@@ -176,7 +176,7 @@ async fn test_peer_address_handling() {
     let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_addr2 = listener2.local_addr().unwrap();
     let stream2 = tokio::net::TcpStream::connect(local_addr2).await.unwrap();
-    let peer_v6 = Peer::new(stream2, addr_v6, tx2);
+    let peer_v6 = Peer::from_tcp_stream_split(stream2, addr_v6, tx2, MAX_PROTOCOL_MESSAGE_LENGTH);
     assert_eq!(peer_v6.address(), addr_v6);
 }
 

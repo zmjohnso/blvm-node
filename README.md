@@ -186,7 +186,7 @@ See [docs/](docs/) for detailed documentation including:
 
 ## Security
 
-See [SECURITY.md](SECURITY.md) for security policies and [BTCDecoded Security Policy](https://github.com/BTCDecoded/.github/blob/main/SECURITY.md) for organization-wide guidelines.
+See [SECURITY.md](SECURITY.md) for security policies, **[Deployment posture](https://docs.thebitcoincommons.org/security/deployment-posture.html)** for operator exposure guidance, and [BTCDecoded Security Policy](https://github.com/BTCDecoded/.github/blob/main/SECURITY.md) for organization-wide guidelines.
 
 Additional hardening required for production mainnet use.
 

@@ -43,10 +43,7 @@ fn transaction_strategy() -> BoxedStrategy<Transaction> {
             inputs: inputs
                 .into_iter()
                 .map(|(hash, index, script_sig, sequence)| TransactionInput {
-                    prevout: OutPoint {
-                        hash: hash.into(),
-                        index,
-                    },
+                    prevout: OutPoint { hash, index },
                     script_sig,
                     sequence,
                 })
@@ -105,7 +102,7 @@ proptest! {
         let inputs: Vec<TransactionInput> = (0..inputs_count)
             .map(|i| TransactionInput {
                 prevout: OutPoint {
-                    hash: [i as u8; 32].into(),
+                    hash: [i as u8; 32],
                     index: i as u32,
                 },
                 script_sig: vec![0x51; i % 100], // Variable length scripts

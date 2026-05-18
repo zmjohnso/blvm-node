@@ -2,23 +2,8 @@
 
 use blvm_node::node::mempool::MempoolManager;
 use blvm_node::node::miner::{MiningCoordinator, MiningEngine, TransactionSelector};
-use blvm_protocol::tx_inputs;
-use blvm_protocol::Transaction;
 use std::sync::Arc;
 use tempfile::TempDir;
-
-fn create_test_transaction() -> Transaction {
-    use blvm_protocol::TransactionOutput;
-    Transaction {
-        version: 1,
-        inputs: tx_inputs![],
-        outputs: blvm_protocol::tx_outputs![TransactionOutput {
-            value: 1000,
-            script_pubkey: vec![0x76, 0xa9, 0x14, 0x88, 0xac],
-        }],
-        lock_time: 0,
-    }
-}
 
 #[test]
 fn test_transaction_selector_new() {

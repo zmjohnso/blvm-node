@@ -181,7 +181,7 @@ jobs:
         run: |
           CACHE_ROOT="${{ github.workspace }}/.build/runner-cache"
           
-          # Generate cache keys from Cargo.toml (sibling libraries do not commit Cargo.lock)
+          # Cache keys from Cargo.toml + sibling manifests + toolchain (root Cargo.lock is not committed per .gitignore).
           DEPS_KEY=$(sha256sum Cargo.toml | cut -d' ' -f1)
           CONSENSUS_DEPS_KEY=$(sha256sum _temp-blvm-consensus/Cargo.toml | cut -d' ' -f1)
           PROTOCOL_DEPS_KEY=$(sha256sum _temp-blvm-protocol/Cargo.toml | cut -d' ' -f1)

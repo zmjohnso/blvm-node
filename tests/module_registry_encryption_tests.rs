@@ -13,7 +13,7 @@ use blvm_node::module::registry::manifest::{ModuleManifest, PaymentSection};
 use blvm_node::network::module_registry_extensions::handle_get_module;
 use blvm_node::network::protocol::GetModuleMessage;
 use blvm_node::payment::processor::PaymentProcessor;
-use blvm_node::payment::state_machine::{PaymentState, PaymentStateMachine};
+use blvm_node::payment::state_machine::PaymentStateMachine;
 use blvm_protocol::address::{BitcoinAddress, Network};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -34,7 +34,7 @@ fn create_test_manifest_with_payment(name: &str) -> ModuleManifest {
     let (author_addr, commons_addr) = test_payment_tb1_addresses();
     let price_sats = 100000u64;
 
-    let message_data = format!("{}||{}||{}", author_addr, commons_addr, price_sats);
+    let message_data = format!("{author_addr}||{commons_addr}||{price_sats}");
     let message_hash: [u8; 32] = Sha256::digest(message_data.as_bytes()).into();
     let (signature_hex, pubkey_hex) =
         common::ecdsa_compact_sig_hex_and_pubkey_hex(&test_key, &message_hash);
@@ -61,13 +61,13 @@ fn create_test_manifest_with_payment(name: &str) -> ModuleManifest {
     ModuleManifest {
         name: name.to_string(),
         version: "1.0.0".to_string(),
-        description: Some(format!("Test module: {}", name)),
+        description: Some(format!("Test module: {name}")),
         author: Some("Test Author".to_string()),
         capabilities: Vec::new(),
         rpc_overrides: Vec::new(),
         dependencies: HashMap::new(),
         optional_dependencies: HashMap::new(),
-        entry_point: format!("{}.so", name),
+        entry_point: format!("{name}.so"),
         config_schema: HashMap::new(),
         binary: None,
         downloads: HashMap::new(),
@@ -115,7 +115,7 @@ async fn create_mock_registry(
         binary_hash,
         verified_at: 0,
         verified_by: Vec::new(),
-        local_path: temp_dir.path().join(format!("{}.so", module_name)),
+        local_path: temp_dir.path().join(format!("{module_name}.so")),
         expires_at: None,
     };
     {
@@ -298,7 +298,7 @@ async fn test_handle_get_module_payment_confirmed_serves_decrypted() {
     let state_machine = Arc::new(PaymentStateMachine::new(processor));
 
     // Set payment state to Settled (confirmed)
-    use blvm_node::Hash;
+
     let tx_hash = [0u8; 32];
     let block_hash = [0u8; 32];
     state_machine

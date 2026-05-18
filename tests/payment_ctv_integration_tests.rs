@@ -70,7 +70,7 @@ async fn test_payment_request_creation() {
         PaymentState::RequestCreated { request_id } => {
             assert_eq!(request_id, payment_id);
         }
-        _ => panic!("Expected RequestCreated state, got {:?}", state),
+        _ => panic!("Expected RequestCreated state, got {state:?}"),
     }
 }
 
@@ -165,7 +165,7 @@ async fn test_payment_state_transitions() {
             assert_eq!(request_id, payment_id);
             assert_eq!(tx, tx_hash);
         }
-        _ => panic!("Expected InMempool state, got {:?}", state),
+        _ => panic!("Expected InMempool state, got {state:?}"),
     }
 
     // Mark as settled
@@ -192,7 +192,7 @@ async fn test_payment_state_transitions() {
             assert_eq!(block, block_hash);
             assert_eq!(confirmation_count, 1);
         }
-        _ => panic!("Expected Settled state, got {:?}", state),
+        _ => panic!("Expected Settled state, got {state:?}"),
     }
 }
 
@@ -232,7 +232,7 @@ async fn test_payment_failure() {
             assert_eq!(request_id, payment_id);
             assert_eq!(r, reason);
         }
-        _ => panic!("Expected Failed state, got {:?}", state),
+        _ => panic!("Expected Failed state, got {state:?}"),
     }
 }
 
@@ -268,8 +268,7 @@ async fn test_list_payments() {
     for payment_id in &payment_ids {
         assert!(
             states.contains_key(payment_id),
-            "Payment {} should be in list",
-            payment_id
+            "Payment {payment_id} should be in list"
         );
     }
 }
@@ -445,8 +444,7 @@ async fn test_concurrent_payment_requests() {
     for payment_id in &payment_ids {
         assert!(
             states.contains_key(payment_id),
-            "Payment {} should be in state machine",
-            payment_id
+            "Payment {payment_id} should be in state machine"
         );
     }
 }

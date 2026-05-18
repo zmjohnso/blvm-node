@@ -129,8 +129,7 @@ fn test_manifest_validator_valid_version_formats() {
         assert_eq!(
             result,
             ValidationResult::Valid,
-            "Version {} should be valid",
-            version
+            "Version {version} should be valid"
         );
     }
 }
@@ -156,11 +155,10 @@ fn test_manifest_validator_invalid_name_format() {
             ValidationResult::Invalid(errors) => {
                 assert!(
                     errors.iter().any(|e| e.contains("Invalid module name")),
-                    "Name '{}' should be invalid",
-                    name
+                    "Name '{name}' should be invalid"
                 );
             }
-            ValidationResult::Valid => panic!("Name '{}' should be invalid", name),
+            ValidationResult::Valid => panic!("Name '{name}' should be invalid"),
         }
     }
 }
@@ -187,8 +185,7 @@ fn test_manifest_validator_valid_name_formats() {
         assert_eq!(
             result,
             ValidationResult::Valid,
-            "Name '{}' should be valid",
-            name
+            "Name '{name}' should be valid"
         );
     }
 }
@@ -274,8 +271,7 @@ fn test_manifest_validator_valid_dependency_versions() {
         assert_eq!(
             result,
             ValidationResult::Valid,
-            "Version '{}' should be valid",
-            version
+            "Version '{version}' should be valid"
         );
     }
 }

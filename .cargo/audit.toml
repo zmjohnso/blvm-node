@@ -4,7 +4,7 @@
 # Reconcile quarterly or when bumping iroh/quinn/hickory/time: run `cargo audit` after temporarily clearing `ignore`
 # and use `cargo tree -i <crate>` to confirm whether each ID still applies.
 #
-# Rationale summaries (details also in Cargo.toml security note and docs/CONSENSUS_SECURITY_HARDENING_PLAN.md):
+# Rationale summaries — details in docs/AUDIT_SUPPRESSIONS.md (table + review dates).
 # - Several IDs may still appear from transitive duplicates even where iroh 0.95 addressed the primary stack; verify before dropping.
 # - Hickory DNS advisories: transitive via iroh until upstream bumps hickory.
 

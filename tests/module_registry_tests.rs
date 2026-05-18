@@ -1,6 +1,6 @@
 //! Tests for module registry (discovery, dependencies, manifest)
 
-use blvm_node::module::registry::dependencies::{DependencyResolution, ModuleDependencies};
+use blvm_node::module::registry::dependencies::ModuleDependencies;
 use blvm_node::module::registry::discovery::{DiscoveredModule, ModuleDiscovery};
 use blvm_node::module::registry::manifest::ModuleManifest;
 use blvm_node::module::traits::ModuleError;
@@ -13,13 +13,13 @@ fn create_test_manifest(name: &str, deps: HashMap<String, String>) -> ModuleMani
     ModuleManifest {
         name: name.to_string(),
         version: "1.0.0".to_string(),
-        description: Some(format!("Test module {}", name)),
+        description: Some(format!("Test module {name}")),
         author: Some("Test Author".to_string()),
         capabilities: Vec::new(),
         rpc_overrides: Vec::new(),
         dependencies: deps,
         optional_dependencies: HashMap::new(),
-        entry_point: format!("{}.so", name),
+        entry_point: format!("{name}.so"),
         config_schema: HashMap::new(),
         binary: None,
         downloads: HashMap::new(),
@@ -37,7 +37,7 @@ fn create_discovered_module(
     DiscoveredModule {
         directory: dir.clone(),
         manifest: create_test_manifest(name, deps),
-        binary_path: dir.join(format!("{}.so", name)),
+        binary_path: dir.join(format!("{name}.so")),
     }
 }
 
@@ -427,7 +427,7 @@ entry_point = "test-module.so"
 
     // Should discover the module (even if binary validation might fail)
     assert!(result.is_ok());
-    let modules = result.unwrap();
+    let _modules = result.unwrap();
     // Note: Binary finding might fail, so we check if discovery at least tried
     // The actual binary finding logic is tested separately
 }

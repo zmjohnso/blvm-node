@@ -129,8 +129,7 @@ fn test_storage_metrics_default() {
     assert_eq!(metrics.utxo_count, 0);
     assert_eq!(metrics.transaction_count, 0);
     assert_eq!(metrics.disk_size, 0);
-    // within_bounds may default to false or true depending on implementation
-    assert!(metrics.within_bounds || !metrics.within_bounds);
+    let _within = metrics.within_bounds;
 }
 
 #[test]
@@ -175,7 +174,7 @@ fn test_node_metrics_structure() {
     // Performance metrics
     assert_eq!(metrics.performance.avg_block_processing_time_ms, 0.0);
     // System metrics
-    assert!(metrics.system.uptime_seconds >= 0);
+    let _uptime = metrics.system.uptime_seconds;
 }
 
 #[test]

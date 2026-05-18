@@ -172,8 +172,8 @@ fn test_config_with_complex_indexing_config() {
     let json = serde_json::to_string(&indexing_config).unwrap();
     let deserialized: IndexingConfig = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(deserialized.enable_address_index, true);
-    assert_eq!(deserialized.enable_value_index, true);
+    assert!(deserialized.enable_address_index);
+    assert!(deserialized.enable_value_index);
     // IndexingStrategy doesn't implement PartialEq, compare by matching
     match (deserialized.strategy, IndexingStrategy::Lazy) {
         (IndexingStrategy::Lazy, IndexingStrategy::Lazy) => {}
@@ -326,7 +326,7 @@ fn test_config_roundtrip_complex_scenario() {
             }
         }
         if let Some(ref indexing) = storage.indexing {
-            assert_eq!(indexing.enable_address_index, true);
+            assert!(indexing.enable_address_index);
             match indexing.strategy {
                 IndexingStrategy::Eager => {}
                 _ => panic!("Expected Eager strategy"),
@@ -366,7 +366,7 @@ fn test_config_defaults_after_partial_deserialization() {
     assert!(pref.allows_tcp());
     // Other fields should use defaults; modules defaults to Some(ModuleConfig::default()) when omitted from JSON
     if let Some(ref modules) = config.modules {
-        assert_eq!(modules.enabled, true);
+        assert!(modules.enabled);
     } else {
         panic!("expected default modules section when omitted from partial JSON");
     }

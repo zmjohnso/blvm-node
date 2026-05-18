@@ -28,7 +28,7 @@ fn test_permission_set_remove() {
     assert!(perms.has(&Permission::ReadBlockchain));
 
     // PermissionSet doesn't have remove method - create new set without permission
-    let mut perms = PermissionSet::new();
+    let perms = PermissionSet::new();
     assert!(!perms.has(&Permission::ReadBlockchain));
 }
 

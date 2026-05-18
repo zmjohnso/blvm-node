@@ -101,12 +101,14 @@ Stratum / pool URL integration with QUIC or other transports is covered in **`bl
 
 ```toml
 [features]
-quinn = ["dep:quinn", "dep:rcgen", "dep:rustls"]
+quinn = ["dep:quinn", "dep:rcgen", "dep:rustls", "dep:h3", "dep:h3-quinn"]
 
 [dependencies]
 quinn = { version = "0.11", optional = true }
 rcgen = { version = "0.11", optional = true }
 rustls = { version = "0.23", optional = true }
+h3 = { version = "0.0.8", optional = true }
+h3-quinn = { version = "0.0.10", optional = true }
 bitflags = "2.4"
 ```
 

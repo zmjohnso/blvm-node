@@ -2,7 +2,7 @@
 
 ## Overview
 
-blvm-node optionally supports JSON-RPC over QUIC using Quinn, providing improved performance and security compared to the standard TCP RPC server.
+blvm-node optionally supports JSON-RPC over **HTTP/3 on QUIC** using Quinn + **`h3`**, sharing the same **`RpcServer`** instance as TCP HTTP JSON-RPC.
 
 ## Features
 
@@ -62,11 +62,10 @@ cargo check --features quinn
 
 ## Security Notes
 
-- **Self-Signed Certificates**: Currently uses self-signed certificates for development
-- **Production**: Should use proper certificate management for production
-- **Bearer / HTTP auth vs QUIC**: JSON-RPC over QUIC does not carry HTTP `Authorization` headers. **When `rpc_auth.required` is true**, the node **does not start the QUIC JSON-RPC listener** (TCP HTTP JSON-RPC is used for authenticated access). A warning is logged at startup. P2P over QUIC (if enabled elsewhere) is unaffected by this RPC guard.
-- **Optional QUIC RPC without mandatory auth**: If authentication is not required, QUIC RPC is subject to the same **IP-based** rate limiting and optional auth paths as configured; Bearer tokens still cannot be sent like on HTTP—use TCP RPC for header-based credentials.
-- **Same Security Boundaries**: QUIC RPC has the same JSON-RPC surface boundaries as TCP RPC (e.g. no wallet access beyond what RPC exposes)
+- **Self-Signed Certificates**: The listener generates a short-lived self-signed certificate by default (development-style).
+- **Production**: Use operational certificate provisioning appropriate for your deployment (or terminate TLS at a QUIC-aware proxy you trust).
+- **HTTP/3 + `[rpc_auth]`**: QUIC JSON-RPC speaks **HTTP/3** (TLS ALPN **`h3`**). **`Authorization: Bearer …`** and all **`RpcAuthManager`** / **`rpc_auth.required`** semantics match **TCP HTTP JSON-RPC** (shared `dispatch_json_rpc_post_body` on the same **`Arc<RpcServer>`**).
+- **Same handler surface**: QUIC HTTP/3 hits the live node handlers (storage, mempool, etc.), not a stub server.
 
 ## P2P QUIC
 
@@ -74,29 +73,11 @@ Transport preferences for peer connections (e.g. `quinn` feature for P2P) are se
 
 ## Client Usage
 
-Clients need QUIC support. Example with `quinn`:
+Use an **HTTP/3** stack on top of QUIC (**ALPN `h3`**): issue **`POST /`** with **`Content-Type: application/json`** and the same JSON-RPC body as TCP HTTP. Supply **`Authorization`** headers exactly like HTTP/1.
 
-```rust
-use quinn::Endpoint;
-use std::net::SocketAddr;
+Development/tests in-tree use **`h3`** + **`h3-quinn`** (see `tests/quic_rpc_smoke_tests.rs` behind **`--features quinn`**).
 
-let server_addr: SocketAddr = "127.0.0.1:18332".parse().unwrap();
-let endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap())?;
-let connection = endpoint.connect(server_addr, "localhost")?.await?;
-
-// Open bidirectional stream
-let (mut send, mut recv) = connection.open_bi().await?;
-
-// Send JSON-RPC request
-let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1}"#;
-send.write_all(request.as_bytes()).await?;
-send.finish().await?;
-
-// Read response
-let mut response = Vec::new();
-recv.read_to_end(&mut response).await?;
-let response_str = String::from_utf8(response)?;
-```
+Raw “JSON bytes only” QUIC streams are **not** the RPC wire format anymore.
 
 ## Benefits Over TCP
 

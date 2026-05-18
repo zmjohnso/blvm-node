@@ -14,6 +14,17 @@ rust-version = "1.82"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("governance", "erlay", "rayon", "wasm-modules"))'] }
+# Integration tests (`tests/*.rs`) intentionally exercise APIs without always consuming every binding.
+unused_variables = "allow"
+unused_comparisons = "allow"
+unused_doc_comments = "allow"
+
+# Integration-test ergonomics (CI runs `cargo clippy --tests -- -D warnings`).
+[lints.clippy]
+assertions_on_constants = "allow"
+too_many_arguments = "allow"
+single_match = "allow"
+field_reassign_with_default = "allow"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -159,6 +170,8 @@ iroh = { version = "=0.95", optional = true }
 quinn = { version = "=0.11", optional = true }
 rcgen = { version = "=0.12", optional = true }
 rustls = { version = "=0.23", optional = true }
+h3 = { version = "=0.0.8", optional = true }
+h3-quinn = { version = "=0.0.10", optional = true }
 
 # Windows Job Objects for process sandboxing (Windows)
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -170,6 +183,7 @@ windows-sys = { version = "=0.59", features = ["Win32_System_JobObjects", "Win32
 # - rsa 0.9.8 (RUSTSEC-2023-0071) - addressed for the iroh upgrade path
 # - paste 1.0.15 (unmaintained) - addressed for the iroh upgrade path
 # `cargo audit` may still report those (or other) IDs while another transitive edge pulls a flagged version.
+# When fixing “primary” edges (e.g. iroh upgrade), paste `cargo tree -i <crate>` for any remaining ignored IDs so reviewers see duplicate paths vs false positives.
 # Reconcile periodically: run audit without `.cargo/audit.toml`, use `cargo tree -i`, then trim ignores.
 # Advisory suppressions for CI: **only** `.cargo/audit.toml` (do not duplicate `--ignore` in workflows).
 # iroh 0.95 transitive stack: hickory-proto/resolver (DNS) may lag — see `.cargo/audit.toml` comments.
@@ -182,7 +196,7 @@ windows-sys = { version = "=0.59", features = ["Win32_System_JobObjects", "Win32
 default = ["sysinfo", "rocksdb", "nix", "libc", "production", "governance", "utxo-commitments", "protocol-verification"]
 # Note: rocksdb and erlay are mutually exclusive due to clang-sys version conflicts
 iroh = ["dep:iroh"]
-quinn = ["dep:quinn", "dep:rcgen", "dep:rustls"]
+quinn = ["dep:quinn", "dep:rcgen", "dep:rustls", "dep:h3", "dep:h3-quinn"]
 utxo-commitments = ["blvm-protocol/utxo-commitments"]
 stratum-v2 = []
 # Signature operations counting
@@ -244,8 +258,11 @@ compression = ["block-compression", "utxo-compression", "witness-compression"]
 # erlay = ["dep:minisketch-rs"]
 
 
-# Security: patch transitive deps via git (crates-io to crates-io patch not allowed)
-# RUSTSEC-2026-0037 quinn-proto DoS, RUSTSEC-2026-0009 time stack exhaustion
+# Security: patch transitive deps via git (crates-io ↔ crates-io patch not allowed).
+# Exit criteria (reconcile with `.cargo/audit.toml` + `docs/AUDIT_SUPPRESSIONS.md`):
+# - quinn-proto: drop when crates.io ships fixes merged at tag `quinn-proto-0.11.14` (RUSTSEC-2026-0037).
+# - time: drop when crates.io `time` ≥ patched release matching tag `v0.3.47` (RUSTSEC-2026-0009).
+# After bump: run plain `cargo audit`, `cargo tree -i quinn-proto`, `cargo tree -i time`, then remove obsolete ignores.
 [patch.crates-io]
 quinn-proto = { git = "https://github.com/quinn-rs/quinn", tag = "quinn-proto-0.11.14" }
 time = { git = "https://github.com/time-rs/time", tag = "v0.3.47" }

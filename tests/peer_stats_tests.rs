@@ -1,6 +1,7 @@
 //! Tests for peer statistics tracking
 
 use blvm_node::network::peer::Peer;
+use blvm_node::network::protocol::MAX_PROTOCOL_MESSAGE_LENGTH;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 
@@ -14,7 +15,7 @@ async fn test_peer_stats_initialization() {
     let local_addr = listener.local_addr().unwrap();
     let stream = tokio::net::TcpStream::connect(local_addr).await.unwrap();
 
-    let peer = Peer::new(stream, addr, tx);
+    let peer = Peer::from_tcp_stream_split(stream, addr, tx, MAX_PROTOCOL_MESSAGE_LENGTH);
 
     // Check initial stats
     assert!(peer.conntime() > 0);
@@ -33,7 +34,7 @@ async fn test_peer_record_send() {
     let local_addr = listener.local_addr().unwrap();
     let stream = tokio::net::TcpStream::connect(local_addr).await.unwrap();
 
-    let mut peer = Peer::new(stream, addr, tx);
+    let mut peer = Peer::from_tcp_stream_split(stream, addr, tx, MAX_PROTOCOL_MESSAGE_LENGTH);
 
     let initial_send = peer.last_send();
     let initial_bytes = peer.bytes_sent();
@@ -54,7 +55,7 @@ async fn test_peer_record_receive() {
     let local_addr = listener.local_addr().unwrap();
     let stream = tokio::net::TcpStream::connect(local_addr).await.unwrap();
 
-    let mut peer = Peer::new(stream, addr, tx);
+    let mut peer = Peer::from_tcp_stream_split(stream, addr, tx, MAX_PROTOCOL_MESSAGE_LENGTH);
 
     let initial_recv = peer.last_recv();
     let initial_bytes = peer.bytes_recv();

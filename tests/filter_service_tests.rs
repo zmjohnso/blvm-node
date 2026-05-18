@@ -1,10 +1,9 @@
 //! Tests for filter service (BIP157/158)
 
 use blvm_node::network::filter_service::BlockFilterService;
-use blvm_protocol::bip157::FilterHeader;
 use blvm_protocol::tx_inputs;
 use blvm_protocol::tx_outputs;
-use blvm_protocol::{Block, BlockHeader, Hash, Transaction};
+use blvm_protocol::{Block, BlockHeader, Transaction};
 
 fn create_test_block(height: u32) -> Block {
     Block {
@@ -99,7 +98,7 @@ fn test_generate_and_cache_filter() {
     assert!(result.is_ok());
 
     let filter = result.unwrap();
-    assert!(filter.num_elements >= 0);
+    let _elements = filter.num_elements;
 }
 
 #[test]

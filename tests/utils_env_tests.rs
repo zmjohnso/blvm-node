@@ -56,8 +56,7 @@ fn test_env_bool_true() {
         std::env::set_var("TEST_ENV_BOOL_TRUE", true_value);
         assert!(
             env_bool("TEST_ENV_BOOL_TRUE"),
-            "Should be true for '{}'",
-            true_value
+            "Should be true for '{true_value}'"
         );
     }
     std::env::remove_var("TEST_ENV_BOOL_TRUE");
@@ -69,8 +68,7 @@ fn test_env_bool_false() {
         std::env::set_var("TEST_ENV_BOOL_FALSE", false_value);
         assert!(
             !env_bool("TEST_ENV_BOOL_FALSE"),
-            "Should be false for '{}'",
-            false_value
+            "Should be false for '{false_value}'"
         );
     }
     std::env::remove_var("TEST_ENV_BOOL_FALSE");

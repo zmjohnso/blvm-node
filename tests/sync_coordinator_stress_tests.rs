@@ -1,18 +1,7 @@
 //! Stress tests for sync coordinator (state transitions, peer disconnection)
 
 use blvm_node::node::sync::{SyncCoordinator, SyncState, SyncStateMachine};
-use blvm_node::{BlockHeader, Hash};
-use blvm_protocol::test_utils::create_test_header;
-use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::time::timeout;
-
-fn header_at_height(height: u64) -> BlockHeader {
-    let mut prev_hash = [0u8; 32];
-    prev_hash[0] = (height % 256) as u8;
-    create_test_header(1231006505 + height, prev_hash)
-}
 
 #[tokio::test]
 async fn test_sync_state_rapid_transitions() {

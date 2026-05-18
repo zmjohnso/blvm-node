@@ -13,7 +13,7 @@ use blvm_node::node::mempool::MempoolManager;
 
 #[tokio::test]
 async fn test_eviction_strategy_lowest_fee_rate() {
-    let mut mempool = MempoolManager::new();
+    let mempool = MempoolManager::new();
     let mut policy = MempoolPolicyConfig::default();
     policy.max_mempool_mb = 1; // 1 MB limit
     policy.max_mempool_txs = 10;
@@ -28,7 +28,7 @@ async fn test_eviction_strategy_lowest_fee_rate() {
 
 #[tokio::test]
 async fn test_eviction_strategy_oldest_first() {
-    let mut mempool = MempoolManager::new();
+    let mempool = MempoolManager::new();
     let mut policy = MempoolPolicyConfig::default();
     policy.max_mempool_mb = 1;
     policy.max_mempool_txs = 10;
@@ -42,7 +42,7 @@ async fn test_eviction_strategy_oldest_first() {
 
 #[tokio::test]
 async fn test_ancestor_count_limit() {
-    let mut mempool = MempoolManager::new();
+    let mempool = MempoolManager::new();
     let mut policy = MempoolPolicyConfig::default();
     policy.max_ancestor_count = 5; // Allow max 5 ancestors
 
@@ -54,7 +54,7 @@ async fn test_ancestor_count_limit() {
 
 #[tokio::test]
 async fn test_ancestor_size_limit() {
-    let mut mempool = MempoolManager::new();
+    let mempool = MempoolManager::new();
     let mut policy = MempoolPolicyConfig::default();
     policy.max_ancestor_size = 10_000; // 10 KB limit
 
@@ -66,7 +66,7 @@ async fn test_ancestor_size_limit() {
 
 #[tokio::test]
 async fn test_descendant_count_limit() {
-    let mut mempool = MempoolManager::new();
+    let mempool = MempoolManager::new();
     let mut policy = MempoolPolicyConfig::default();
     policy.max_descendant_count = 5; // Allow max 5 descendants
 
@@ -78,7 +78,7 @@ async fn test_descendant_count_limit() {
 
 #[tokio::test]
 async fn test_descendant_size_limit() {
-    let mut mempool = MempoolManager::new();
+    let mempool = MempoolManager::new();
     let mut policy = MempoolPolicyConfig::default();
     policy.max_descendant_size = 10_000; // 10 KB limit
 
@@ -90,7 +90,7 @@ async fn test_descendant_size_limit() {
 
 #[tokio::test]
 async fn test_mempool_size_limit() {
-    let mut mempool = MempoolManager::new();
+    let mempool = MempoolManager::new();
     let mut policy = MempoolPolicyConfig::default();
     policy.max_mempool_mb = 1; // 1 MB limit
     policy.max_mempool_txs = 100;
@@ -104,7 +104,7 @@ async fn test_mempool_size_limit() {
 
 #[tokio::test]
 async fn test_mempool_transaction_count_limit() {
-    let mut mempool = MempoolManager::new();
+    let mempool = MempoolManager::new();
     let mut policy = MempoolPolicyConfig::default();
     policy.max_mempool_txs = 10;
 
@@ -116,7 +116,7 @@ async fn test_mempool_transaction_count_limit() {
 
 #[tokio::test]
 async fn test_mempool_expiry() {
-    let mut mempool = MempoolManager::new();
+    let mempool = MempoolManager::new();
     let mut policy = MempoolPolicyConfig::default();
     policy.mempool_expiry_hours = 1; // 1 hour expiry
 

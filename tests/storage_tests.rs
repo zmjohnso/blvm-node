@@ -9,7 +9,6 @@ use blvm_node::storage::chainstate::ChainState;
 use blvm_node::storage::txindex::TxIndex;
 use blvm_node::storage::utxostore::UtxoStore;
 use common::*;
-use std::sync::Arc;
 
 #[test]
 fn test_storage_creation() {

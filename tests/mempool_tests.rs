@@ -49,7 +49,7 @@ async fn test_mempool_get_prioritized_transactions() {
         index: 0,
     };
     utxo_set.insert(
-        outpoint.clone(),
+        outpoint,
         std::sync::Arc::new(UTXO {
             value: 10000,
             script_pubkey: vec![0x51].into(),
@@ -63,7 +63,7 @@ async fn test_mempool_get_prioritized_transactions() {
     let high_fee_tx = Transaction {
         version: 1,
         inputs: blvm_protocol::tx_inputs![TransactionInput {
-            prevout: outpoint.clone(),
+            prevout: outpoint,
             script_sig: vec![],
             sequence: 0xffffffff,
         }],

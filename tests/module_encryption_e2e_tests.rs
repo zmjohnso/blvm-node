@@ -34,7 +34,7 @@ fn create_test_manifest_with_payment(name: &str) -> ModuleManifest {
     let (author_addr, commons_addr) = test_payment_tb1_addresses();
     let price_sats = 100000u64;
 
-    let message_data = format!("{}||{}||{}", author_addr, commons_addr, price_sats);
+    let message_data = format!("{author_addr}||{commons_addr}||{price_sats}");
     let message_hash: [u8; 32] = Sha256::digest(message_data.as_bytes()).into();
     let (signature_hex, pubkey_hex) =
         common::ecdsa_compact_sig_hex_and_pubkey_hex(&test_key, &message_hash);
@@ -61,13 +61,13 @@ fn create_test_manifest_with_payment(name: &str) -> ModuleManifest {
     ModuleManifest {
         name: name.to_string(),
         version: "1.0.0".to_string(),
-        description: Some(format!("Test module: {}", name)),
+        description: Some(format!("Test module: {name}")),
         author: Some("Test Author".to_string()),
         capabilities: Vec::new(),
         rpc_overrides: Vec::new(),
         dependencies: HashMap::new(),
         optional_dependencies: HashMap::new(),
-        entry_point: format!("{}.so", name),
+        entry_point: format!("{name}.so"),
         config_schema: HashMap::new(),
         binary: None,
         downloads: HashMap::new(),
@@ -113,7 +113,7 @@ async fn create_test_registry(
         binary_hash,
         verified_at: 0,
         verified_by: Vec::new(),
-        local_path: temp_dir.path().join(format!("{}.so", module_name)),
+        local_path: temp_dir.path().join(format!("{module_name}.so")),
         expires_at: None,
     };
     cache.write().await.cache(cached);
@@ -195,7 +195,7 @@ async fn test_full_encrypted_module_purchase_flow() {
         assert_ne!(encrypted_binary, module_binary);
 
         // Mark payment settled on-chain (simulated)
-        use blvm_node::Hash;
+
         let tx_hash = [0x01u8; 32];
         let block_hash = [0x02u8; 32];
         state_machine
@@ -352,7 +352,7 @@ async fn test_payment_state_transitions() {
     assert!(matches!(state, PaymentState::RequestCreated { .. }));
 
     // 2. InMempool (payment pending but in mempool - can decrypt for CTV)
-    use blvm_node::Hash;
+
     let tx_hash = [0x01u8; 32];
     state_machine
         .mark_in_mempool(&created_payment_id, tx_hash)

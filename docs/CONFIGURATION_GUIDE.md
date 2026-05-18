@@ -104,6 +104,26 @@ Node config can override module settings via `[modules.<name>]` (e.g. `[modules.
 database_backend = "redb"  # Example override; omit to inherit node / module_subprocess preference
 ```
 
+### WebAssembly in-process modules (`wasm-modules`)
+
+When **`blvm-sdk`** loads guests with wasmtime (`wasm-modules`), optional **`[modules.<name>]`** string keys configure embedder budgets (defaults are suitable for maintainer-signed modules; tighten for untrusted WASM):
+
+| Key | Meaning | Default |
+|-----|---------|--------|
+| `wasm_max_linear_memory_bytes` | Cap for guest linear memory (bytes) | `33554432` (32 MiB) |
+| `wasm_fuel_per_invocation` | Fuel reset before each guest entry (`dispatch_*`, string exports) | `50000000` |
+| `wasm_max_instances` | Max Wasm instances in the store | `8` |
+| `wasm_max_tables` | Max tables | `64` |
+| `wasm_max_memories` | Max memories | `4` |
+
+Example:
+
+```toml
+[modules.my-wasm-mod]
+wasm_max_linear_memory_bytes = "16777216"
+wasm_fuel_per_invocation = "10000000"
+```
+
 ## RPC configuration
 
 **RPC listen address** is determined by the **`blvm`** binary (`--rpc-addr` and `BLVM_RPC_ADDR`), not by a `bind_address` field in the config file.
@@ -124,6 +144,10 @@ connection_rate_limit_window_seconds = 60
 **Authentication and token rate limits** use **`[rpc_auth]`** (documented in the **blvm-docs** configuration reference).
 
 Optional **`rest_api`** / QUIC RPC are separate features; see node docs for `RestApiConfig` / `quinn` when enabled.
+
+**Transport × authentication** (TCP JSON-RPC, QUIC, REST): [RPC transport × authentication](https://docs.thebitcoincommons.org/security/rpc-transport-auth-matrix.html).
+
+**Deployment posture** (exposure classes, P2P, backups, modules): [Deployment posture](https://docs.thebitcoincommons.org/security/deployment-posture.html).
 
 ## Example Configurations
 

@@ -1,3 +1,9 @@
+//! Shared fixtures for `tests/*.rs` integration targets.
+//!
+//! Each integration test binary only uses a subset of these helpers; unused items are expected.
+
+#![allow(dead_code)]
+
 use blvm_node::storage::blockstore::BlockStore;
 use blvm_node::storage::chainstate::ChainState;
 use blvm_node::storage::txindex::TxIndex;
@@ -28,7 +34,7 @@ pub fn create_protocol_test_utxo_set() -> blvm_protocol::UtxoSet {
         },
         Arc::new(blvm_protocol::UTXO {
             value: 100_000,
-            script_pubkey: vec![0x76, 0xa9, 0x14, 0x00].repeat(20).into(),
+            script_pubkey: [0x76, 0xa9, 0x14, 0x00].repeat(20).into(),
             height: 0,
             is_coinbase: false,
         }),
@@ -55,7 +61,7 @@ pub fn create_protocol_test_tx(
         }],
         outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: output_value as i64,
-            script_pubkey: vec![0x76, 0xa9, 0x14].repeat(size / 2).into(),
+            script_pubkey: [0x76, 0xa9, 0x14].repeat(size / 2),
         }],
         lock_time: 0,
     }
@@ -283,16 +289,16 @@ impl TestUtxoSetBuilder {
 
 pub fn random_hash() -> Hash {
     let mut hash = [0u8; 32];
-    for i in 0..32 {
-        hash[i] = rand::random::<u8>();
+    for b in &mut hash {
+        *b = rand::random::<u8>();
     }
     Hash::from(hash)
 }
 
 pub fn random_hash20() -> [u8; 20] {
     let mut hash = [0u8; 20];
-    for i in 0..20 {
-        hash[i] = rand::random::<u8>();
+    for b in &mut hash {
+        *b = rand::random::<u8>();
     }
     hash
 }

@@ -25,12 +25,9 @@ async fn get_block_template_safe(
             // If it fails with "Target too large" or "Insufficient headers" and we have few headers, this is expected
             // The difficulty adjustment algorithm requires 2016 headers to work correctly
             if err_str.contains("Target too large") || err_str.contains("Insufficient headers") {
-                Err(format!(
-                    "{} (expected with fewer than 2016 headers)",
-                    err_str
-                ))
+                Err(format!("{err_str} (expected with fewer than 2016 headers)"))
             } else {
-                Err(format!("Unexpected error: {:?}", e))
+                Err(format!("Unexpected error: {e:?}"))
             }
         }
     }
@@ -88,7 +85,6 @@ fn setup_minimal_chain(storage: &Arc<Storage>) -> Result<(), Box<dyn std::error:
     // To avoid issues, let's space headers to make timespan closer to expected_time
     let mut prev_hash = genesis_hash_array;
     let mut prev_timestamp = 1231006505;
-    let mut prev_header = genesis_header.clone();
 
     // Add blocks with spacing that makes timespan reasonable for difficulty adjustment
     // Use 10-minute intervals but ensure we have enough headers
@@ -128,7 +124,6 @@ fn setup_minimal_chain(storage: &Arc<Storage>) -> Result<(), Box<dyn std::error:
         // Update for next iteration
         prev_hash = block_hash_array;
         prev_timestamp = block_header.timestamp;
-        prev_header = block_header.clone();
 
         // Update chain tip
         storage
@@ -196,7 +191,7 @@ async fn test_get_current_height_initialized() {
                 // In a full implementation, we should use the previous block's bits for the first 2016 blocks
                 return; // Skip the rest of the test
             } else {
-                panic!("get_block_template failed with unexpected error: {:?}", e);
+                panic!("get_block_template failed with unexpected error: {e:?}");
             }
         }
     }
@@ -222,7 +217,7 @@ async fn test_get_tip_header_initialized() {
             if e.contains("Target too large") || e.contains("Insufficient headers") {
                 return; // Skip test - expected behavior with few headers
             }
-            panic!("Unexpected error: {}", e);
+            panic!("Unexpected error: {e}");
         }
     };
     // Verify previousblockhash exists (indicates tip header was retrieved)
@@ -247,7 +242,7 @@ async fn test_get_utxo_set_empty() {
         if e.contains("Target too large") {
             return; // Skip test - expected behavior with few headers
         }
-        panic!("Unexpected error: {}", e);
+        panic!("Unexpected error: {e}");
     }
 }
 
@@ -283,7 +278,7 @@ async fn test_get_utxo_set_populated() {
         if e.contains("Target too large") {
             return; // Skip test - expected behavior with few headers
         }
-        panic!("Unexpected error: {}", e);
+        panic!("Unexpected error: {e}");
     }
 }
 
@@ -307,7 +302,7 @@ async fn test_transaction_serialization_in_template() {
             if e.contains("Target too large") {
                 return; // Skip test - expected behavior with few headers
             }
-            panic!("Unexpected error: {}", e);
+            panic!("Unexpected error: {e}");
         }
     };
 
@@ -343,7 +338,7 @@ async fn test_calculate_tx_hash_format() {
             if e.contains("Target too large") {
                 return; // Skip test - expected behavior with few headers
             }
-            panic!("Unexpected error: {}", e);
+            panic!("Unexpected error: {e}");
         }
     };
 
@@ -400,7 +395,7 @@ async fn test_calculate_tx_hash_matches_bitcoin_core() {
             if e.contains("Target too large") {
                 return; // Skip test - expected behavior with few headers
             }
-            panic!("Unexpected error: {}", e);
+            panic!("Unexpected error: {e}");
         }
     };
 
@@ -440,7 +435,7 @@ async fn test_calculate_weight() {
             if e.contains("Target too large") {
                 return; // Skip test - expected behavior with few headers
             }
-            panic!("Unexpected error: {}", e);
+            panic!("Unexpected error: {e}");
         }
     };
 
@@ -473,7 +468,7 @@ async fn test_calculate_coinbase_value() {
             if e.contains("Target too large") {
                 return; // Skip test - expected behavior with few headers
             }
-            panic!("Unexpected error: {}", e);
+            panic!("Unexpected error: {e}");
         }
     };
 
@@ -510,7 +505,7 @@ async fn test_get_active_rules() {
             if e.contains("Target too large") || e.contains("Insufficient headers") {
                 return; // Skip test - expected behavior with few headers
             }
-            panic!("Unexpected error: {}", e);
+            panic!("Unexpected error: {e}");
         }
     };
     let rules = result.get("rules").unwrap().as_array().unwrap();

@@ -3,7 +3,7 @@
 #[path = "stub_node_api.rs"]
 mod stub_node_api;
 
-use blvm_node::module::api::hub::{AuditEntry, ModuleApiHub};
+use blvm_node::module::api::hub::ModuleApiHub;
 use blvm_node::module::ipc::protocol::{RequestMessage, RequestPayload, ResponsePayload};
 use blvm_node::module::security::permissions::{Permission, PermissionSet};
 use blvm_node::module::traits::ModuleError;
@@ -51,9 +51,9 @@ async fn test_module_api_hub_handle_handshake() {
 
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
-        eprintln!("Error: {:?}", e);
+        eprintln!("Error: {e:?}");
     }
-    assert!(result.is_ok(), "Request failed: {:?}", result);
+    assert!(result.is_ok(), "Request failed: {result:?}");
 
     let response = result.unwrap();
     if let Some(ResponsePayload::HandshakeAck { node_version }) = response.payload {
@@ -106,9 +106,9 @@ async fn test_module_api_hub_handle_get_chain_tip() {
 
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
-        eprintln!("Error: {:?}", e);
+        eprintln!("Error: {e:?}");
     }
-    assert!(result.is_ok(), "Request failed: {:?}", result);
+    assert!(result.is_ok(), "Request failed: {result:?}");
 
     let response = result.unwrap();
     if let Some(ResponsePayload::Hash(hash)) = response.payload {
@@ -139,9 +139,9 @@ async fn test_module_api_hub_handle_get_block() {
 
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
-        eprintln!("Error: {:?}", e);
+        eprintln!("Error: {e:?}");
     }
-    assert!(result.is_ok(), "Request failed: {:?}", result);
+    assert!(result.is_ok(), "Request failed: {result:?}");
 
     let response = result.unwrap();
     if let Some(ResponsePayload::Block(block)) = response.payload {
@@ -172,9 +172,9 @@ async fn test_module_api_hub_handle_get_block_header() {
 
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
-        eprintln!("Error: {:?}", e);
+        eprintln!("Error: {e:?}");
     }
-    assert!(result.is_ok(), "Request failed: {:?}", result);
+    assert!(result.is_ok(), "Request failed: {result:?}");
 
     let response = result.unwrap();
     if let Some(ResponsePayload::BlockHeader(header)) = response.payload {
@@ -205,9 +205,9 @@ async fn test_module_api_hub_handle_get_transaction() {
 
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
-        eprintln!("Error: {:?}", e);
+        eprintln!("Error: {e:?}");
     }
-    assert!(result.is_ok(), "Request failed: {:?}", result);
+    assert!(result.is_ok(), "Request failed: {result:?}");
 
     let response = result.unwrap();
     if let Some(ResponsePayload::Transaction(tx)) = response.payload {
@@ -238,9 +238,9 @@ async fn test_module_api_hub_handle_has_transaction() {
 
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
-        eprintln!("Error: {:?}", e);
+        eprintln!("Error: {e:?}");
     }
-    assert!(result.is_ok(), "Request failed: {:?}", result);
+    assert!(result.is_ok(), "Request failed: {result:?}");
 
     let response = result.unwrap();
     if let Some(ResponsePayload::Bool(exists)) = response.payload {
@@ -269,9 +269,9 @@ async fn test_module_api_hub_handle_get_block_height() {
 
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
-        eprintln!("Error: {:?}", e);
+        eprintln!("Error: {e:?}");
     }
-    assert!(result.is_ok(), "Request failed: {:?}", result);
+    assert!(result.is_ok(), "Request failed: {result:?}");
 
     let response = result.unwrap();
     if let Some(ResponsePayload::U64(height)) = response.payload {
@@ -305,9 +305,9 @@ async fn test_module_api_hub_handle_get_utxo() {
 
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
-        eprintln!("Error: {:?}", e);
+        eprintln!("Error: {e:?}");
     }
-    assert!(result.is_ok(), "Request failed: {:?}", result);
+    assert!(result.is_ok(), "Request failed: {result:?}");
 
     let response = result.unwrap();
     if let Some(ResponsePayload::Utxo(utxo)) = response.payload {
@@ -338,9 +338,9 @@ async fn test_module_api_hub_handle_subscribe_events() {
 
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
-        eprintln!("Error: {:?}", e);
+        eprintln!("Error: {e:?}");
     }
-    assert!(result.is_ok(), "Request failed: {:?}", result);
+    assert!(result.is_ok(), "Request failed: {result:?}");
 
     let response = result.unwrap();
     if let Some(ResponsePayload::SubscribeAck) = response.payload {
@@ -368,7 +368,7 @@ async fn test_module_api_hub_permission_denied() {
 
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
-        eprintln!("Error: {:?}", e);
+        eprintln!("Error: {e:?}");
     }
     assert!(result.is_err(), "Expected permission denied error");
     // Permission errors are returned as OperationError, not PermissionDenied

@@ -8,6 +8,10 @@ use blvm_node::utils::async_helpers::{
 use std::time::Duration;
 use tokio::time::Instant;
 
+type AsyncResultFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<i32, String>> + Send>>;
+type AsyncOp = fn() -> AsyncResultFuture;
+
 #[tokio::test]
 async fn test_delay_before() {
     let start = Instant::now();
@@ -41,7 +45,7 @@ async fn test_ignore_error_failure() {
 #[tokio::test]
 async fn test_collect_results() {
     // Each closure has a distinct type; exercise `collect_results` without mixing closures in one vec.
-    let results = vec![
+    let results = [
         ignore_error(|| async { Ok::<i32, String>(1) }, "test (0)").await,
         ignore_error(|| async { Ok::<i32, String>(2) }, "test (1)").await,
         ignore_error(
@@ -88,9 +92,7 @@ async fn test_with_timeout_opt_timeout() {
 
 #[tokio::test]
 async fn test_collect_results_empty() {
-    let operations: Vec<
-        fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<i32, String>> + Send>>,
-    > = vec![];
+    let operations: Vec<AsyncOp> = vec![];
 
     let results = collect_results(operations, "test").await;
 

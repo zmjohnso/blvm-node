@@ -3,7 +3,7 @@
 #[cfg(feature = "quinn")]
 mod tests {
     use blvm_node::network::quinn_transport::QuinnTransport;
-    use blvm_node::network::transport::{Transport, TransportAddr};
+    use blvm_node::network::transport::{Transport, TransportAddr, TransportListener};
     use std::net::SocketAddr;
 
     #[tokio::test]

@@ -36,7 +36,7 @@ async fn test_message_id_deduplication_multiple() {
 
     // Add multiple different message IDs
     for i in 0..10 {
-        let msg_id = format!("msg-{}", i);
+        let msg_id = format!("msg-{i}");
         assert!(protection
             .check_message_id(&msg_id, current_timestamp() as i64)
             .await
@@ -246,14 +246,8 @@ async fn test_concurrent_message_ids() {
     }
 
     // Only one should succeed, the rest should fail
-    let successes = results
-        .iter()
-        .filter(|r| if let Ok(Ok(_)) = r { true } else { false })
-        .count();
-    let failures = results
-        .iter()
-        .filter(|r| if let Ok(Err(_)) = r { true } else { false })
-        .count();
+    let successes = results.iter().filter(|r| matches!(r, Ok(Ok(_)))).count();
+    let failures = results.iter().filter(|r| matches!(r, Ok(Err(_)))).count();
 
     assert_eq!(successes, 1, "Only one concurrent check should succeed");
     assert_eq!(failures, 9, "Nine concurrent checks should fail");
@@ -279,14 +273,8 @@ async fn test_concurrent_request_ids() {
     }
 
     // Only one should succeed, the rest should fail
-    let successes = results
-        .iter()
-        .filter(|r| if let Ok(Ok(_)) = r { true } else { false })
-        .count();
-    let failures = results
-        .iter()
-        .filter(|r| if let Ok(Err(_)) = r { true } else { false })
-        .count();
+    let successes = results.iter().filter(|r| matches!(r, Ok(Ok(_)))).count();
+    let failures = results.iter().filter(|r| matches!(r, Ok(Err(_)))).count();
 
     assert_eq!(successes, 1, "Only one concurrent check should succeed");
     assert_eq!(failures, 9, "Nine concurrent checks should fail");

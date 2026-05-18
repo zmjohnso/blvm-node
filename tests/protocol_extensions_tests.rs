@@ -4,7 +4,6 @@
 
 use blvm_node::network::protocol::{FilterPreferences, GetFilteredBlockMessage, GetUTXOSetMessage};
 use blvm_node::network::protocol_extensions::{handle_get_filtered_block, handle_get_utxo_set};
-use blvm_node::storage::database::DatabaseBackend;
 use blvm_node::storage::hashing::double_sha256;
 use blvm_node::storage::Storage;
 use blvm_node::{Block, BlockHeader, Transaction};

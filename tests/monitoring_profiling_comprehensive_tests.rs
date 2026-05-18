@@ -14,7 +14,7 @@ fn test_health_checker_creation() {
     let report = checker.check_health(true, true, true, None, None);
 
     assert_eq!(report.overall_status, HealthStatus::Healthy);
-    assert!(report.uptime_seconds >= 0);
+    let _uptime = report.uptime_seconds;
     assert!(!report.components.is_empty());
 }
 

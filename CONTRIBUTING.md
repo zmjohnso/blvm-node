@@ -72,11 +72,12 @@ Reviewers will check:
 5. **Documentation** - Is it clear and complete?
 6. **Security** - Any potential vulnerabilities?
 
-### Approval Process
+### Dependency bumps (`cargo audit`)
 
-- **At least 2 approvals** required for node-critical changes
-- **Security team review** for network security changes
-- **Performance review** for storage/network changes
+On **`iroh`**, **`quinn`**, **`hickory`**, **`time`**, or other security-sensitive upgrades:
+
+1. Follow **`docs/AUDIT_SUPPRESSIONS.md`** — temporarily clear **`.cargo/audit.toml`** ignores, run **`cargo audit`**, and shrink ignores only when the graph supports it.
+2. Attach raw audit output (or **`cargo tree -i`** snippets) to the PR when advisories remain **or** when another transitive edge still pulls a flagged version after fixing the primary dependency path.
 
 ## Getting Help
 

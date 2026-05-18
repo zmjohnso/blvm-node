@@ -9,13 +9,10 @@ use blvm_node::payment::processor::{PaymentError, PaymentProcessor};
 fn test_payment_config_defaults() {
     // Test default configuration values
     let config = PaymentConfig::default();
-    assert_eq!(config.p2p_enabled, true, "P2P should be enabled by default");
-    assert_eq!(
-        config.http_enabled, false,
-        "HTTP should be disabled by default"
-    );
-    assert_eq!(
-        config.module_payments_enabled, true,
+    assert!(config.p2p_enabled, "P2P should be enabled by default");
+    assert!(!config.http_enabled, "HTTP should be disabled by default");
+    assert!(
+        config.module_payments_enabled,
         "Module payments should be enabled by default"
     );
     assert_eq!(
@@ -37,12 +34,9 @@ fn test_payment_config_defaults() {
 fn test_rest_api_config_defaults() {
     // Test default REST API configuration values
     let config = RestApiConfig::default();
-    assert_eq!(
-        config.enabled, false,
-        "REST API should be disabled by default"
-    );
-    assert_eq!(
-        config.payment_endpoints_enabled, false,
+    assert!(!config.enabled, "REST API should be disabled by default");
+    assert!(
+        !config.payment_endpoints_enabled,
         "Payment endpoints should be disabled by default"
     );
 }
@@ -206,8 +200,8 @@ fn test_payment_config_module_payments_disabled() {
         module_payments_enabled: false,
         ..Default::default()
     };
-    assert_eq!(
-        config.module_payments_enabled, false,
+    assert!(
+        !config.module_payments_enabled,
         "Module payments should be disabled"
     );
 }
@@ -219,9 +213,9 @@ fn test_rest_api_config_enabled() {
         enabled: true,
         payment_endpoints_enabled: false,
     };
-    assert_eq!(config.enabled, true, "REST API should be enabled");
-    assert_eq!(
-        config.payment_endpoints_enabled, false,
+    assert!(config.enabled, "REST API should be enabled");
+    assert!(
+        !config.payment_endpoints_enabled,
         "Payment endpoints should still be disabled"
     );
 }
@@ -233,9 +227,9 @@ fn test_rest_api_config_payment_endpoints_enabled() {
         enabled: true,
         payment_endpoints_enabled: true,
     };
-    assert_eq!(config.enabled, true, "REST API should be enabled");
-    assert_eq!(
-        config.payment_endpoints_enabled, true,
+    assert!(config.enabled, "REST API should be enabled");
+    assert!(
+        config.payment_endpoints_enabled,
         "Payment endpoints should be enabled"
     );
 }
@@ -306,11 +300,11 @@ fn test_payment_config_toml_parsing() {
     "#;
 
     let config: PaymentConfig = toml::from_str(toml_str).expect("Should parse TOML");
-    assert_eq!(config.p2p_enabled, true);
-    assert_eq!(config.http_enabled, false);
+    assert!(config.p2p_enabled);
+    assert!(!config.http_enabled);
     assert_eq!(config.network, Some("regtest".to_string()));
     assert_eq!(config.payment_store_path, "custom/path");
-    assert_eq!(config.module_payments_enabled, true);
+    assert!(config.module_payments_enabled);
 }
 
 #[test]
@@ -323,17 +317,14 @@ fn test_payment_config_toml_with_defaults() {
     "#;
 
     let config: PaymentConfig = toml::from_str(toml_str).expect("Should parse TOML");
-    assert_eq!(config.p2p_enabled, false);
-    assert_eq!(
-        config.http_enabled, false,
-        "Should use default for missing field"
-    );
+    assert!(!config.p2p_enabled);
+    assert!(!config.http_enabled, "Should use default for missing field");
     assert_eq!(
         config.payment_store_path, "data/payments",
         "Should use default for missing field"
     );
-    assert_eq!(
-        config.module_payments_enabled, true,
+    assert!(
+        config.module_payments_enabled,
         "Should use default for missing field"
     );
     assert_eq!(
@@ -354,8 +345,8 @@ fn test_rest_api_config_toml_parsing() {
     "#;
 
     let config: RestApiConfig = toml::from_str(toml_str).expect("Should parse TOML");
-    assert_eq!(config.enabled, true);
-    assert_eq!(config.payment_endpoints_enabled, true);
+    assert!(config.enabled);
+    assert!(config.payment_endpoints_enabled);
 }
 
 #[test]
@@ -368,9 +359,9 @@ fn test_rest_api_config_toml_with_defaults() {
     "#;
 
     let config: RestApiConfig = toml::from_str(toml_str).expect("Should parse TOML");
-    assert_eq!(config.enabled, true);
-    assert_eq!(
-        config.payment_endpoints_enabled, false,
+    assert!(config.enabled);
+    assert!(
+        !config.payment_endpoints_enabled,
         "Should use default for missing field"
     );
 }

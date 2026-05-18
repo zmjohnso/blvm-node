@@ -18,6 +18,8 @@ Authentication is optional. When enabled, use:
 - **Token-based**: `Authorization: Bearer <token>`
 - **Certificate-based**: TLS client certificates
 
+For **TCP HTTP vs QUIC JSON-RPC vs REST** and which auth modes apply, see **[RPC transport × authentication](https://docs.thebitcoincommons.org/security/rpc-transport-auth-matrix.html)** (BLVM docs).
+
 ## Rate Limiting
 
 Rate limiting is enforced per IP, per user, and per method. Default limits:

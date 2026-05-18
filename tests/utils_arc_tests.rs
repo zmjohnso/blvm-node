@@ -46,7 +46,7 @@ fn test_arc_clone_pair_different_types() {
     let (cloned1, cloned2) = arc_clone_pair((&arc1, &arc2));
 
     assert_eq!(*cloned1, vec![1, 2, 3]);
-    assert_eq!(*cloned2, true);
+    assert!(*cloned2);
 }
 
 #[test]

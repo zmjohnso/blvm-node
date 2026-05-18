@@ -86,7 +86,7 @@ async fn test_custom_messages_different_ids() {
     let now = current_timestamp() as i64;
 
     for i in 0..10 {
-        let message_id = format!("custom-msg-{}", i);
+        let message_id = format!("custom-msg-{i}");
         assert!(protection.check_message_id(&message_id, now).await.is_ok());
     }
 

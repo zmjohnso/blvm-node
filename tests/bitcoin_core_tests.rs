@@ -88,7 +88,7 @@ mod bitcoin_core_tests {
         let coin = parse_coin(&data).unwrap();
         assert_eq!(coin.amount, 1000000);
         assert_eq!(coin.height, 100);
-        assert_eq!(coin.is_coinbase, true);
+        assert!(coin.is_coinbase);
         assert_eq!(coin.script, b"script");
     }
 
@@ -145,7 +145,7 @@ mod bitcoin_core_tests {
         // Write block size (80 bytes for header)
         file.write_all(&80u32.to_le_bytes()).unwrap();
         // Write minimal block header (80 bytes)
-        file.write_all(&vec![0u8; 80]).unwrap();
+        file.write_all(&[0u8; 80]).unwrap();
 
         // Test reader creation with cache
         let cache_dir = temp_dir.path().join("cache");
@@ -182,7 +182,7 @@ mod bitcoin_core_tests {
         let mut file = File::create(&file_path).unwrap();
         file.write_all(&[0xF9, 0xBE, 0xB4, 0xD9]).unwrap();
         file.write_all(&80u32.to_le_bytes()).unwrap();
-        file.write_all(&vec![0u8; 80]).unwrap();
+        file.write_all(&[0u8; 80]).unwrap();
 
         let cache_dir = temp_dir.path().join("cache");
 

@@ -255,9 +255,11 @@ async fn test_payment_request_not_found() {
 #[tokio::test]
 async fn test_payment_processor_config_validation() {
     // Test that HTTP requires feature flag
-    let mut config = PaymentConfig::default();
-    config.p2p_enabled = false;
-    config.http_enabled = true;
+    let config = PaymentConfig {
+        p2p_enabled: false,
+        http_enabled: true,
+        ..Default::default()
+    };
 
     #[cfg(not(feature = "bip70-http"))]
     {
@@ -283,9 +285,11 @@ async fn test_payment_processor_config_validation() {
 #[tokio::test]
 async fn test_payment_processor_no_transport_enabled() {
     // Test that at least one transport must be enabled
-    let mut config = PaymentConfig::default();
-    config.p2p_enabled = false;
-    config.http_enabled = false;
+    let config = PaymentConfig {
+        p2p_enabled: false,
+        http_enabled: false,
+        ..Default::default()
+    };
 
     let result = PaymentProcessor::new(config);
     assert!(result.is_err());

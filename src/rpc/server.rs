@@ -9,7 +9,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{Method, Request, Response, StatusCode};
+use hyper::{HeaderMap, Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
@@ -30,6 +30,18 @@ use std::collections::HashMap;
 /// Default maximum request body size (1MB) when not configured.
 /// Matches config rpc.max_request_size_bytes default.
 pub const DEFAULT_MAX_REQUEST_SIZE: usize = 1_048_576;
+
+/// JSON-RPC POST outcome shared by HTTP/1 and HTTP/3 transports.
+pub(crate) enum DispatchJsonRpcPostOutcome {
+    Success {
+        response_json: String,
+        request_id_short: String,
+    },
+    Error {
+        status: StatusCode,
+        message: String,
+    },
+}
 
 /// JSON-RPC server
 #[derive(Clone)]
@@ -65,6 +77,12 @@ pub struct RpcServer {
 }
 
 impl RpcServer {
+    /// Configured maximum JSON-RPC POST body size (bytes).
+    #[inline]
+    pub(crate) fn max_request_body_bytes(&self) -> usize {
+        self.max_request_size
+    }
+
     /// Default RPC handlers (used by `new` and `with_auth`). Single place so adding a handler type updates one spot.
     fn default_handlers() -> (
         Arc<blockchain::BlockchainRpc>,
@@ -468,18 +486,6 @@ impl RpcServer {
         let body = req.collect().await?;
         let body_bytes = body.to_bytes();
 
-        // Enforce maximum request size
-        if body_bytes.len() > server.max_request_size {
-            return Ok(Self::http_error_response(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                &format!(
-                    "Request body too large: {} bytes (max: {} bytes)",
-                    body_bytes.len(),
-                    server.max_request_size
-                ),
-            ));
-        }
-
         // Parse JSON body
         let json_body = match std::str::from_utf8(&body_bytes) {
             Ok(s) => s.to_string(),
@@ -491,127 +497,25 @@ impl RpcServer {
             }
         };
 
-        // Generate request ID for tracing
-        let request_id = Uuid::new_v4().to_string();
-        let request_id_short = request_id.chars().take(8).collect::<String>();
-
-        // Create tracing span with request context
-        let span = tracing::span!(
-            tracing::Level::DEBUG,
-            "rpc_request",
-            request_id = %request_id_short,
-            method = tracing::field::Empty,
-            client_addr = %addr,
-            request_size = json_body.len()
-        );
-
-        let _guard = span.enter();
-
-        debug!("HTTP RPC request from {}: {} bytes", addr, json_body.len());
-
-        // Parse request for method name and batch detection
-        let parsed = serde_json::from_str::<Value>(&json_body).ok();
-        let (method_name, rate_limit_n) = match &parsed {
-            Some(Value::Array(requests)) => {
-                // Batch request: consume min(len, cap) tokens
-                let cap = server.batch_rate_multiplier_cap as usize;
-                let n = requests.len().min(cap) as u32;
-                ("batch".to_string(), n)
-            }
-            Some(req) => (
-                req.get("method")
-                    .and_then(|m| m.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "unknown".to_string()),
-                1u32,
-            ),
-            None => ("unknown".to_string(), 1u32),
-        };
-
-        // Record method in span
-        Span::current().record("method", &method_name);
-
-        // Authenticate request if authentication is enabled
-        let auth_result = if let Some(ref auth_manager) = server.auth_manager {
-            Some(auth_manager.authenticate_request(&headers, addr).await)
-        } else {
-            None
-        };
-
-        // Check rate limiting (multiple layers)
-        if let Some(ref auth_manager) = server.auth_manager {
-            if let Some(ref auth_result) = auth_result {
-                // Check if authentication failed
-                if let Some(error) = &auth_result.error {
-                    return Ok(Self::http_error_response(StatusCode::UNAUTHORIZED, error));
-                }
-
-                // Check per-user rate limiting (for authenticated users)
-                if let Some(ref user_id) = auth_result.user_id {
-                    let endpoint = format!("rpc:{method_name}");
-                    if !auth_manager
-                        .check_rate_limit_with_endpoint_n(
-                            user_id,
-                            Some(addr),
-                            Some(&endpoint),
-                            rate_limit_n,
-                        )
-                        .await
-                    {
-                        return Ok(Self::http_error_response(
-                            StatusCode::TOO_MANY_REQUESTS,
-                            "User rate limit exceeded",
-                        ));
-                    }
-                }
-            } else {
-                // Unauthenticated request - check per-IP rate limit
-                let endpoint = format!("rpc:{method_name}");
-                if !auth_manager
-                    .check_ip_rate_limit_with_endpoint_n(addr, Some(&endpoint), rate_limit_n)
-                    .await
-                {
-                    return Ok(Self::http_error_response(
-                        StatusCode::TOO_MANY_REQUESTS,
-                        "IP rate limit exceeded",
-                    ));
-                }
-            }
-
-            // Check per-method rate limiting (applies to all requests; batch uses "batch")
-            if !auth_manager.check_method_rate_limit(&method_name).await {
-                return Ok(Self::http_error_response(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    &format!("Method '{method_name}' rate limit exceeded"),
-                ));
+        match Self::dispatch_json_rpc_post_body(Arc::clone(&server), &headers, addr, &json_body)
+            .await
+        {
+            DispatchJsonRpcPostOutcome::Success {
+                response_json,
+                request_id_short,
+            } => Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/json")
+                .header("Content-Length", response_json.len())
+                .header("X-Request-ID", request_id_short)
+                .body(Full::new(Bytes::from(response_json)))
+                .expect(
+                    "Failed to build HTTP response - this should never happen with valid inputs",
+                )),
+            DispatchJsonRpcPostOutcome::Error { status, message } => {
+                Ok(Self::http_error_response(status, &message))
             }
         }
-
-        // Process JSON-RPC request (reuse server instance with cached handlers)
-        let start_time = std::time::Instant::now();
-        let response_json = Self::process_request_with_server(server, &json_body).await;
-        let duration = start_time.elapsed();
-
-        // Record response metrics in span
-        Span::current().record("duration_ms", duration.as_millis() as u64);
-        Span::current().record("response_size", response_json.len());
-
-        debug!(
-            "RPC request completed in {:?} (request_id: {})",
-            duration, request_id_short
-        );
-
-        // Build HTTP response with request ID header
-        // Response::builder() returns http::Error, but we need hyper::Error
-        // Since hyper::Error doesn't implement From<http::Error> or From<io::Error>,
-        // we use expect() since Response::builder() should never fail with valid inputs
-        Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "application/json")
-            .header("Content-Length", response_json.len())
-            .header("X-Request-ID", request_id_short)
-            .body(Full::new(Bytes::from(response_json)))
-            .expect("Failed to build HTTP response - this should never happen with valid inputs"))
     }
 
     /// Handle Prometheus metrics endpoint
@@ -955,15 +859,150 @@ impl RpcServer {
         Ok(response)
     }
 
-    /// Create HTTP error response
-    fn http_error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
+    /// JSON body for HTTP error responses (same shape as [`Self::http_error_response`]).
+    pub(crate) fn http_error_json_body(status: StatusCode, message: &str) -> String {
         let body = json!({
             "error": {
                 "code": status.as_u16(),
                 "message": message
             }
         });
-        let body_json = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
+        serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// Dispatch JSON-RPC POST: authentication, rate limits, and handler invocation (HTTP/1 + HTTP/3).
+    pub(crate) async fn dispatch_json_rpc_post_body(
+        server: Arc<Self>,
+        headers: &HeaderMap,
+        addr: SocketAddr,
+        json_body: &str,
+    ) -> DispatchJsonRpcPostOutcome {
+        if json_body.len() > server.max_request_size {
+            return DispatchJsonRpcPostOutcome::Error {
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                message: format!(
+                    "Request body too large: {} bytes (max: {} bytes)",
+                    json_body.len(),
+                    server.max_request_size
+                ),
+            };
+        }
+
+        if let Some(content_type) = headers.get("content-type") {
+            if content_type.as_bytes() != b"application/json" {
+                warn!("Invalid Content-Type from {}: {:?}", addr, content_type);
+            }
+        }
+
+        let request_id = Uuid::new_v4().to_string();
+        let request_id_short = request_id.chars().take(8).collect::<String>();
+
+        let span = tracing::span!(
+            tracing::Level::DEBUG,
+            "rpc_request",
+            request_id = %request_id_short,
+            method = tracing::field::Empty,
+            client_addr = %addr,
+            request_size = json_body.len()
+        );
+
+        let _guard = span.enter();
+
+        debug!("RPC request from {}: {} bytes", addr, json_body.len());
+
+        let parsed = serde_json::from_str::<Value>(json_body).ok();
+        let (method_name, rate_limit_n) = match &parsed {
+            Some(Value::Array(requests)) => {
+                let cap = server.batch_rate_multiplier_cap as usize;
+                let n = requests.len().min(cap) as u32;
+                ("batch".to_string(), n)
+            }
+            Some(req) => (
+                req.get("method")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                1u32,
+            ),
+            None => ("unknown".to_string(), 1u32),
+        };
+
+        Span::current().record("method", &method_name);
+
+        let auth_result = if let Some(ref auth_manager) = server.auth_manager {
+            Some(auth_manager.authenticate_request(headers, addr).await)
+        } else {
+            None
+        };
+
+        if let Some(ref auth_manager) = server.auth_manager {
+            if let Some(ref auth_result) = auth_result {
+                if let Some(error) = &auth_result.error {
+                    return DispatchJsonRpcPostOutcome::Error {
+                        status: StatusCode::UNAUTHORIZED,
+                        message: error.clone(),
+                    };
+                }
+
+                if let Some(ref user_id) = auth_result.user_id {
+                    let endpoint = format!("rpc:{method_name}");
+                    if !auth_manager
+                        .check_rate_limit_with_endpoint_n(
+                            user_id,
+                            Some(addr),
+                            Some(&endpoint),
+                            rate_limit_n,
+                        )
+                        .await
+                    {
+                        return DispatchJsonRpcPostOutcome::Error {
+                            status: StatusCode::TOO_MANY_REQUESTS,
+                            message: "User rate limit exceeded".to_string(),
+                        };
+                    }
+                }
+            } else {
+                let endpoint = format!("rpc:{method_name}");
+                if !auth_manager
+                    .check_ip_rate_limit_with_endpoint_n(addr, Some(&endpoint), rate_limit_n)
+                    .await
+                {
+                    return DispatchJsonRpcPostOutcome::Error {
+                        status: StatusCode::TOO_MANY_REQUESTS,
+                        message: "IP rate limit exceeded".to_string(),
+                    };
+                }
+            }
+
+            if !auth_manager.check_method_rate_limit(&method_name).await {
+                return DispatchJsonRpcPostOutcome::Error {
+                    status: StatusCode::TOO_MANY_REQUESTS,
+                    message: format!("Method '{method_name}' rate limit exceeded"),
+                };
+            }
+        }
+
+        let start_time = std::time::Instant::now();
+        let response_json = Self::process_request_with_server(server, json_body).await;
+        let duration = start_time.elapsed();
+
+        Span::current().record("duration_ms", duration.as_millis() as u64);
+        Span::current().record("response_size", response_json.len());
+
+        debug!(
+            "RPC request completed in {:?} (request_id: {})",
+            duration, request_id_short
+        );
+
+        DispatchJsonRpcPostOutcome::Success {
+            response_json,
+            request_id_short,
+        }
+    }
+
+    /// Create HTTP error response
+    fn http_error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
+        let body_json = Self::http_error_json_body(status, message);
 
         Response::builder()
             .status(status)

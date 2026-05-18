@@ -97,8 +97,7 @@ async fn test_sendrawtransaction_maxfeerate_fail() {
         // Must not fail at hex/parameter parsing — the tx hex must be syntactically valid
         assert!(
             !error_str.contains("even-length") && !error_str.contains("invalid hex"),
-            "Should not fail at hex format level: {}",
-            error_str
+            "Should not fail at hex format level: {error_str}"
         );
     }
 }
@@ -119,8 +118,7 @@ async fn test_sendrawtransaction_allowhighfees() {
         let error_str = e.to_string();
         assert!(
             !error_str.contains("fee_rate_too_high") && !error_str.contains("exceeds maximum"),
-            "Should not fail due to fee rate when allowhighfees=true: {}",
-            error_str
+            "Should not fail due to fee rate when allowhighfees=true: {error_str}"
         );
     }
 }

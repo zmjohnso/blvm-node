@@ -9,7 +9,6 @@ use blvm_node::module::encryption::{
 };
 use blvm_node::module::traits::ModuleError;
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
 use tempfile::TempDir;
 
 /// Helper to create a test module hash

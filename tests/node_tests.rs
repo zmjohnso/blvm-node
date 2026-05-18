@@ -48,7 +48,7 @@ async fn test_sync_coordinator() {
 
 #[tokio::test]
 async fn test_mempool_manager() {
-    let mut mempool = mempool::MempoolManager::new();
+    let mempool = mempool::MempoolManager::new();
 
     // Test initial state
     assert_eq!(mempool.size(), 0);
@@ -288,7 +288,7 @@ async fn test_sync_coordinator_stalled_detection() {
 
 #[tokio::test]
 async fn test_mempool_manager_operations() {
-    let mut mempool = mempool::MempoolManager::new();
+    let mempool = mempool::MempoolManager::new();
 
     // Test initial state
     assert_eq!(mempool.size(), 0);
@@ -309,7 +309,7 @@ async fn test_mempool_manager_operations() {
         }],
         outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: 25_0000_0000, // Different value
-            script_pubkey: p2pkh_script(random_hash20()).into(),
+            script_pubkey: p2pkh_script(random_hash20()),
         }],
         lock_time: 1, // Different lock time
     };
@@ -328,7 +328,7 @@ async fn test_mempool_manager_operations() {
 
 #[tokio::test]
 async fn test_mempool_manager_eviction() {
-    let mut mempool = mempool::MempoolManager::new();
+    let mempool = mempool::MempoolManager::new();
 
     // Add many transactions to test eviction
     for i in 0..100 {
@@ -349,7 +349,7 @@ async fn test_mempool_manager_eviction() {
 
 #[tokio::test]
 async fn test_mempool_manager_fee_prioritization() {
-    let mut mempool = mempool::MempoolManager::new();
+    let mempool = mempool::MempoolManager::new();
 
     // Test fee-based prioritization
     let high_fee_tx = TestTransactionBuilder::new()
@@ -380,7 +380,7 @@ async fn test_mempool_manager_fee_prioritization() {
 
 #[tokio::test]
 async fn test_mempool_manager_conflict_detection() {
-    let mut mempool = mempool::MempoolManager::new();
+    let mempool = mempool::MempoolManager::new();
 
     // Test conflict detection
     let outpoint = OutPoint {
@@ -389,7 +389,7 @@ async fn test_mempool_manager_conflict_detection() {
     };
 
     let tx1 = TestTransactionBuilder::new()
-        .add_input(outpoint.clone())
+        .add_input(outpoint)
         .add_output(1000, p2pkh_script(random_hash20()))
         .build();
 
@@ -533,7 +533,7 @@ async fn test_mining_coordinator_mining_state() {
 #[tokio::test]
 async fn test_sync_mempool_interaction() {
     let sync = sync::SyncCoordinator::new();
-    let mut mempool = mempool::MempoolManager::new();
+    let mempool = mempool::MempoolManager::new();
 
     // Test interaction between sync and mempool
     // Test set_state (simplified - actual method may not exist)
@@ -552,7 +552,7 @@ async fn test_mining_mempool_interaction() {
     use std::sync::Arc;
     let mempool = Arc::new(blvm_node::node::mempool::MempoolManager::new());
     let mut miner = miner::MiningCoordinator::new(mempool, None);
-    let mut mempool = mempool::MempoolManager::new();
+    let mempool = mempool::MempoolManager::new();
 
     // Test interaction between mining and mempool
     miner.enable_mining();

@@ -7,10 +7,8 @@ mod common;
 
 use blvm_node::config::PaymentConfig;
 use blvm_node::module::registry::manifest::{ModuleManifest, PaymentSection};
-use blvm_node::module::security::signing::ModuleSigner;
 use blvm_node::payment::processor::{PaymentError, PaymentProcessor};
 use blvm_protocol::address::{BitcoinAddress, Network};
-use blvm_protocol::payment::PaymentOutput;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
@@ -44,7 +42,7 @@ fn create_manifest_with_payment(
     let test_key = common::test_secp256k1_scalar_one();
 
     // Create message in the format used by verify_payment_addresses
-    let message_data = format!("{}||{}||{}", author_address, commons_address, price_sats);
+    let message_data = format!("{author_address}||{commons_address}||{price_sats}");
     let message_hash: [u8; 32] = Sha256::digest(message_data.as_bytes()).into();
     let (signature_hex, pubkey_hex) =
         common::ecdsa_compact_sig_hex_and_pubkey_hex(&test_key, &message_hash);
@@ -73,13 +71,13 @@ fn create_manifest_with_payment(
     ModuleManifest {
         name: name.to_string(),
         version: "1.0.0".to_string(),
-        description: Some(format!("Test module: {}", name)),
+        description: Some(format!("Test module: {name}")),
         author: Some("Test Author".to_string()),
         capabilities: Vec::new(),
         rpc_overrides: Vec::new(),
         dependencies: HashMap::new(),
         optional_dependencies: HashMap::new(),
-        entry_point: format!("{}.so", name),
+        entry_point: format!("{name}.so"),
         config_schema: HashMap::new(),
         binary: None,
         downloads: HashMap::new(),
@@ -310,10 +308,9 @@ async fn test_module_payment_request_invalid_signature() {
         PaymentError::ProcessingError(msg) if msg.contains("signature") => {
             // Also acceptable - signature parsing might fail first
         }
-        e => panic!(
-            "Expected ValidationFailed or ProcessingError for invalid signature, got: {:?}",
-            e
-        ),
+        e => {
+            panic!("Expected ValidationFailed or ProcessingError for invalid signature, got: {e:?}")
+        }
     }
 }
 
@@ -328,7 +325,7 @@ async fn test_module_payment_request_different_prices() {
     for price in prices {
         let (author_addr, commons_addr) = create_test_addresses();
         let manifest = create_manifest_with_payment(
-            &format!("module-{}", price),
+            &format!("module-{price}"),
             price,
             &author_addr,
             &commons_addr,
@@ -338,7 +335,7 @@ async fn test_module_payment_request_different_prices() {
 
         // Create module hash
         let module_hash = {
-            let data = format!("module-{}", price).into_bytes();
+            let data = format!("module-{price}").into_bytes();
             let hash = Sha256::digest(&data);
             let mut h = [0u8; 32];
             h.copy_from_slice(&hash);
@@ -348,10 +345,7 @@ async fn test_module_payment_request_different_prices() {
         let payment_request = processor
             .create_module_payment_request(&manifest, &module_hash, node_script.clone(), None)
             .await
-            .expect(&format!(
-                "Failed to create payment request for price {}",
-                price
-            ));
+            .unwrap_or_else(|_| panic!("Failed to create payment request for price {price}"));
 
         // Verify split proportions remain correct
         let outputs = &payment_request.payment_details.outputs;
@@ -366,18 +360,15 @@ async fn test_module_payment_request_different_prices() {
 
         assert_eq!(
             author_amount, expected_author,
-            "Author amount incorrect for price {}",
-            price
+            "Author amount incorrect for price {price}"
         );
         assert_eq!(
             commons_amount, expected_commons,
-            "Commons amount incorrect for price {}",
-            price
+            "Commons amount incorrect for price {price}"
         );
         assert_eq!(
             node_amount, expected_node,
-            "Node amount incorrect for price {}",
-            price
+            "Node amount incorrect for price {price}"
         );
     }
 }

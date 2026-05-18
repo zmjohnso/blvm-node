@@ -110,14 +110,14 @@ mod rocksdb_tests {
 
         // Create multiple trees dynamically
         for i in 0..10 {
-            let tree_name = format!("dynamic_tree_{}", i);
+            let tree_name = format!("dynamic_tree_{i}");
             let tree = db.open_tree(&tree_name).unwrap();
             tree.insert(b"test_key", b"test_value").unwrap();
         }
 
         // Verify all trees exist and are isolated
         for i in 0..10 {
-            let tree_name = format!("dynamic_tree_{}", i);
+            let tree_name = format!("dynamic_tree_{i}");
             let tree = db.open_tree(&tree_name).unwrap();
             assert_eq!(tree.get(b"test_key").unwrap(), Some(b"test_value".to_vec()));
         }

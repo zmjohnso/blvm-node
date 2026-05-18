@@ -2,7 +2,7 @@
 
 use blvm_node::network::compact_blocks::{calculate_short_tx_id, calculate_tx_hash, CompactBlock};
 use blvm_node::network::transport::TransportType;
-use blvm_node::{Block, BlockHeader, Hash, Transaction};
+use blvm_node::{Block, BlockHeader, Transaction};
 use blvm_protocol::tx_inputs;
 use blvm_protocol::tx_outputs;
 
@@ -150,8 +150,7 @@ fn test_compact_block_serialization() {
 fn test_should_prefer_compact_blocks_tcp() {
     let should_prefer =
         blvm_node::network::compact_blocks::should_prefer_compact_blocks(TransportType::Tcp);
-    // TCP doesn't necessarily prefer compact blocks
-    assert!(should_prefer == false || should_prefer == true); // Just verify it returns a bool
+    let _ = should_prefer; // exercised API; value depends on transport
 }
 
 #[test]
@@ -173,15 +172,14 @@ fn test_negotiate_optimizations() {
 
     // Should return valid values
     assert!(compact_version == 1 || compact_version == 2);
-    assert!(prefer_compact == true || prefer_compact == false);
-    assert!(supports_filters == true || supports_filters == false);
+    let _ = (prefer_compact, supports_filters);
 }
 
 #[test]
 fn test_is_quic_transport() {
     let is_quic = blvm_node::network::compact_blocks::is_quic_transport(TransportType::Tcp);
     // TCP is not QUIC
-    assert_eq!(is_quic, false);
+    assert!(!is_quic);
 }
 
 #[test]

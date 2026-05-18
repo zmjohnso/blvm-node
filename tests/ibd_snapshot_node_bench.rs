@@ -152,7 +152,7 @@ fn node_hot_path_once(
 
     match result {
         ValidationResult::Valid => {}
-        ValidationResult::Invalid(reason) => panic!("height {} invalid: {}", height, reason),
+        ValidationResult::Invalid(reason) => panic!("height {height} invalid: {reason}"),
     }
 
     // 7. apply_utxo_delta (direct, no SyncBatch)
@@ -171,8 +171,7 @@ fn node_hot_path_once(
     let prep_ms = total_ms - validate_ms - delta_ms;
     if height >= 100_000 && height % 50_000 == 0 {
         eprintln!(
-            "  [BREAKDOWN h={}] total={:.2}ms prep={:.2}ms validate={:.2}ms delta={:.2}ms",
-            height, total_ms, prep_ms, validate_ms, delta_ms
+            "  [BREAKDOWN h={height}] total={total_ms:.2}ms prep={prep_ms:.2}ms validate={validate_ms:.2}ms delta={delta_ms:.2}ms"
         );
     }
 
@@ -222,13 +221,13 @@ fn bench_node_hot_path() {
     let mut supplement_cache_buf: Vec<OutPointKey> = Vec::new();
     let mut bip30_index = Bip30Index::default();
 
-    eprintln!("=== Node Hot-Path Benchmark ({} iters) ===", iterations);
+    eprintln!("=== Node Hot-Path Benchmark ({iterations} iters) ===");
     eprintln!("height,txs,inputs,min_ms,median_ms,mean_ms,p95_ms,max_ms,bps");
 
     let mut focus_medians: Vec<f64> = Vec::new();
 
     for &h in &heights {
-        let dir = base.join(format!("height_{}", h));
+        let dir = base.join(format!("height_{h}"));
         let (block, mut witnesses, utxo_template) = match load_snapshot(&dir) {
             Some(x) => x,
             None => continue,
@@ -298,8 +297,7 @@ fn bench_node_hot_path() {
         let bps = 1000.0 / median;
 
         eprintln!(
-            "{},{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.0}",
-            h, n_txs, n_inputs, min, median, mean, p95, max, bps
+            "{h},{n_txs},{n_inputs},{min:.2},{median:.2},{mean:.2},{p95:.2},{max:.2},{bps:.0}"
         );
 
         if h >= 100_000 {
