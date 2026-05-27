@@ -279,6 +279,29 @@ impl RestApiServer {
                     request_id,
                 ));
             }
+
+            // RBAC: write endpoints (POST) require admin privileges.
+            // GET endpoints are read-only and do not need admin access.
+            if method == Method::POST {
+                let caller_is_admin = match auth_result.user_id.as_ref() {
+                    Some(uid) => auth_manager.is_user_admin(uid).await,
+                    None => false,
+                };
+                if !caller_is_admin {
+                    warn!(
+                        "REST API admin check failed for POST {} from {}",
+                        path, addr
+                    );
+                    return Ok(Self::error_response_with_headers(
+                        server.security_headers_enabled,
+                        StatusCode::FORBIDDEN,
+                        "FORBIDDEN",
+                        "POST endpoints require admin privileges",
+                        None,
+                        request_id,
+                    ));
+                }
+            }
         }
 
         // Only allow GET and POST methods

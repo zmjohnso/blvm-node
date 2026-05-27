@@ -97,6 +97,10 @@ pub struct RpcManager {
     module_manager: Option<Arc<tokio::sync::Mutex<ModuleManager>>>,
     /// Protocol engine for mining RPC (`generatetoaddress` on regtest).
     protocol_engine: Option<Arc<BitcoinProtocolEngine>>,
+    /// Allow binding a non-loopback address without an auth_manager.
+    /// Defaults to `false` — startup fails if a public bind is attempted without auth.
+    /// Set to `true` only in controlled environments (e.g. isolated test networks).
+    allow_unauthenticated_rpc: bool,
 }
 
 impl RpcManager {
@@ -122,6 +126,7 @@ impl RpcManager {
             #[cfg(feature = "rest-api")]
             rest_api_shutdown_tx: None,
             auth_manager: None,
+            allow_unauthenticated_rpc: false,
             node_shutdown: None,
             #[cfg(feature = "bip70-http")]
             payment_processor: None,
@@ -254,6 +259,13 @@ impl RpcManager {
         self.auth_manager = Some(auth_manager);
     }
 
+    /// Allow the RPC server to start on a non-loopback address without an auth manager.
+    /// Call this only in isolated test networks or when a reverse-proxy enforces auth upstream.
+    pub fn allow_unauthenticated_rpc(mut self, allow: bool) -> Self {
+        self.allow_unauthenticated_rpc = allow;
+        self
+    }
+
     /// Set storage and mempool dependencies for RPC handlers
     pub fn with_dependencies(
         mut self,
@@ -372,6 +384,7 @@ impl RpcManager {
             shutdown_tx: None,
             quinn_shutdown_tx: None,
             auth_manager: None,
+            allow_unauthenticated_rpc: false,
             node_shutdown: None,
             #[cfg(feature = "bip70-http")]
             payment_processor: None,
@@ -416,6 +429,21 @@ impl RpcManager {
     ///
     /// Starts TCP server (always) and optionally QUIC server if enabled
     pub async fn start(&mut self) -> Result<()> {
+        // Safety check: refuse to bind a public address without authentication configured.
+        // An unauthenticated RPC server on a public interface exposes stop/invalidateblock/
+        // loadmodule and other destructive methods to the network.
+        if self.auth_manager.is_none()
+            && !self.server_addr.ip().is_loopback()
+            && !self.allow_unauthenticated_rpc
+        {
+            return Err(anyhow::anyhow!(
+                "RPC server would bind to public address {} without authentication. \
+                 Configure rpc.auth (add tokens) or call .allow_unauthenticated_rpc(true) \
+                 to explicitly opt out of this safety check.",
+                self.server_addr
+            ));
+        }
+
         info!("Starting TCP RPC server on {}", self.server_addr);
 
         let connection_limiter = Arc::new(tokio::sync::Mutex::new(ConnectionRateLimiter::new(

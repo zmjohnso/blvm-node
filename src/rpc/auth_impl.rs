@@ -139,8 +139,12 @@ pub struct RpcAuthManager {
     /// Authentication failure tracker for DoS protection
     auth_failure_tracker: AuthFailureTracker,
     /// Tokens granted admin (destructive-method) access.
-    /// When empty, all authenticated tokens are treated as admin (backward-compatible).
+    /// When empty AND `all_tokens_are_admin` is false (the default), no token is admin.
+    /// Set `all_tokens_are_admin = true` only for single-operator deployments that pre-date RBAC.
     admin_tokens: Arc<Mutex<HashSet<String>>>,
+    /// When `true`, every authenticated token is treated as admin regardless of `admin_tokens`.
+    /// Defaults to `false`. Prefer explicit admin token registration instead.
+    all_tokens_are_admin: bool,
 }
 
 impl RpcAuthManager {
@@ -157,6 +161,7 @@ impl RpcAuthManager {
             method_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             auth_failure_tracker: AuthFailureTracker::new(),
             admin_tokens: Arc::new(Mutex::new(HashSet::new())),
+            all_tokens_are_admin: false,
         }
     }
 
@@ -173,7 +178,16 @@ impl RpcAuthManager {
             method_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             auth_failure_tracker: AuthFailureTracker::new(),
             admin_tokens: Arc::new(Mutex::new(HashSet::new())),
+            all_tokens_are_admin: false,
         }
+    }
+
+    /// Grant every authenticated token admin privileges, regardless of `admin_tokens`.
+    /// Use only for single-operator setups upgrading from pre-RBAC versions.
+    /// Prefer `add_admin_token` for production deployments.
+    pub fn with_all_tokens_admin(mut self, enabled: bool) -> Self {
+        self.all_tokens_are_admin = enabled;
+        self
     }
 
     /// Returns true when RPC clients must authenticate (no anonymous access).
@@ -206,19 +220,18 @@ impl RpcAuthManager {
 
     /// Returns `true` when `user_id` may call admin-only RPC methods.
     ///
-    /// The rule: if no admin tokens have been configured (empty set), every authenticated
-    /// user is treated as admin for backward compatibility. Once at least one admin token
-    /// is configured, only explicitly-designated admin tokens are granted admin access.
+    /// The rule: if `all_tokens_are_admin` is set, every authenticated user is admin.
+    /// Otherwise only tokens explicitly registered via `add_admin_token` are admin.
+    /// An empty `admin_tokens` set with `all_tokens_are_admin = false` (the default)
+    /// means **no token is admin** — configure admin tokens or set `all_tokens_are_admin`.
     pub async fn is_user_admin(&self, user_id: &UserId) -> bool {
-        let admins = self.admin_tokens.lock().await;
-        if admins.is_empty() {
-            // Backward-compat: all authenticated tokens are admin when no RBAC configured.
+        if self.all_tokens_are_admin {
             return true;
         }
+        let admins = self.admin_tokens.lock().await;
         if let UserId::Token(ref tok) = user_id {
             admins.contains(tok.as_str())
         } else {
-            // Certificate-based users are not admin unless explicitly listed.
             false
         }
     }

@@ -55,6 +55,10 @@ fn admin_rpc_methods() -> &'static HashSet<&'static str> {
             // Mining (template generation is privileged)
             "getblocktemplate",
             "submitblock",
+            // Transaction broadcast and mempool management (can affect network propagation)
+            "sendrawtransaction",
+            "createrawtransaction",
+            "savemempool",
         ])
     })
 }
@@ -1024,6 +1028,33 @@ impl RpcServer {
                         status: StatusCode::FORBIDDEN,
                         message: format!("Method '{method_name}' requires admin privileges"),
                     };
+                }
+            }
+
+            // Batch RBAC: check each sub-request method against the admin set.
+            // The single-request check above uses method_name="batch" and is bypassed
+            // for arrays; this closes that gap by inspecting every sub-request method.
+            if let Some(Value::Array(requests)) = &parsed {
+                let needs_admin = requests.iter().any(|req| {
+                    req.get("method")
+                        .and_then(|m| m.as_str())
+                        .map(|m| admin_rpc_methods().contains(m))
+                        .unwrap_or(false)
+                });
+                if needs_admin {
+                    let caller_is_admin =
+                        match auth_result.as_ref().and_then(|r| r.user_id.as_ref()) {
+                            Some(uid) => auth_manager.is_user_admin(uid).await,
+                            None => false,
+                        };
+                    if !caller_is_admin {
+                        return DispatchJsonRpcPostOutcome::Error {
+                            status: StatusCode::FORBIDDEN,
+                            message: "Batch contains admin-only method(s); \
+                                      admin privileges required"
+                                .to_string(),
+                        };
+                    }
                 }
             }
         }
