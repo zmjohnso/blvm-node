@@ -6,11 +6,11 @@ on:
   push:
     branches: [ main, develop ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, develop ]
   release:
     types: [published]
   repository_dispatch:
-    types: [build-chain, upstream-changed]
+    types: [build-chain, upstream-changed, develop-chain]
   # Manual runs use the same `skip_tests` input as blvm-consensus / blvm-protocol; commit
   # [skip_tests], [skip_docs], [skip_verify], [skip_fuzz] on push.
   workflow_dispatch:
@@ -51,6 +51,7 @@ jobs:
   setup:
     name: Setup
     runs-on: [self-hosted, Linux, X64, builds]
+
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -383,6 +384,20 @@ jobs:
           if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
           if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
 
+      - name: Checkout develop scripts (blvm)
+        if: github.ref == 'refs/heads/develop' || github.base_ref == 'develop'
+        uses: actions/checkout@v4
+        with:
+          repository: BTCDecoded/blvm
+          ref: ${{ github.ref_name == 'develop' && 'develop' || 'main' }}
+          path: _develop-blvm
+          fetch-depth: 1
+
+      - name: Resolve develop registry deps (test)
+        uses: ./_develop-blvm/.github/actions/develop-resolve-test
+        continue-on-error: true
+        if: github.ref == 'refs/heads/develop' || github.base_ref == 'develop'
+
       - name: Isolate CARGO_HOME for this runner
         # RUNNER_TEMP is set by the Actions runner to a per-runner-process temp dir.
         # Using it as CARGO_HOME prevents parallel runner processes (org2, org2-03, …)
@@ -582,23 +597,20 @@ jobs:
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
 
-      - name: Verify spec-lock build deps (Z3 / clang / jq)
+      # Deps → install tool → crates.io consensus src → dual **verify** (+ attestation env) in one blocking step.
+      - name: Verify
         run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+
           pkg-config --exists z3 || { echo "❌ z3 not found; install it on the runner."; exit 1; }
           command -v clang >/dev/null 2>&1 || { echo "❌ clang not found; install it on the runner."; exit 1; }
           command -v jq >/dev/null 2>&1 || { echo "❌ jq not found; install it on the runner."; exit 1; }
           pkg-config --exists openssl 2>/dev/null || command -v openssl >/dev/null 2>&1 || { echo "❌ openssl not found; install it on the runner."; exit 1; }
           echo "✅ Z3 + clang + jq + openssl present."
 
-      - name: Install cargo-spec-lock from crates.io
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo install blvm-spec-lock --version '>=0.1.3, <0.2' --locked --features z3
+          cargo install blvm-spec-lock --version '>=0.1, <1' --locked --features z3
 
-      - name: Fetch blvm-consensus sources from crates.io
-        id: consensus_src
-        run: |
-          # crates.io returns 403 without a descriptive User-Agent (see https://crates.io/policies)
           UA='BTCDecoded/blvm-node verify job (https://github.com/BTCDecoded/blvm-node)'
           CONS_VER=$(curl -fsSL --retry 3 --retry-delay 2 -A "$UA" \
             'https://crates.io/api/v1/crates/blvm-consensus' \
@@ -612,13 +624,10 @@ jobs:
           curl -fsSL --retry 3 --retry-delay 2 -A "$UA" \
             "https://crates.io/api/v1/crates/blvm-consensus/${CONS_VER}/download" \
             | tar -xz -C "$GITHUB_WORKSPACE/_spec_verify"
-          echo "path=$GITHUB_WORKSPACE/_spec_verify/blvm-consensus-${CONS_VER}" >> "$GITHUB_OUTPUT"
+          CONS_PATH="$GITHUB_WORKSPACE/_spec_verify/blvm-consensus-${CONS_VER}"
 
-      - name: Run blvm-spec-lock verify (blvm-consensus)
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          echo "🔒 Running blvm-spec-lock verification on crates.io blvm-consensus..."
-          SPEC_ARGS="--crate-path ${{ steps.consensus_src.outputs.path }}"
+          echo "🔒 Running cargo-spec-lock verify on crates.io blvm-consensus (merged F_* + #[spec_locked])..."
+          SPEC_ARGS="--crate-path $CONS_PATH"
           if [ -f "../blvm-spec/PROTOCOL.md" ] && [ -f "../blvm-spec/ARCHITECTURE.md" ]; then
             SPEC_ARGS="$SPEC_ARGS --spec-path ../blvm-spec/PROTOCOL.md ../blvm-spec/ARCHITECTURE.md"
             echo "Using PROTOCOL.md + ARCHITECTURE.md for spec-derived contracts"
@@ -630,7 +639,10 @@ jobs:
             exit 1
           fi
           export SPEC_LOCK_STRICT=1
-          cargo-spec-lock verify $SPEC_ARGS 2>&1 | tee "$GITHUB_WORKSPACE/spec_lock_consensus_output.txt"
+          export SPEC_LOCK_Z3_TIMEOUT_SECS="${SPEC_LOCK_Z3_TIMEOUT_SECS:-120}"
+          cargo-spec-lock verify $SPEC_ARGS --timeout 120 --format human \
+            --json-out "$GITHUB_WORKSPACE/spec_lock_consensus_verify.json" \
+            2>&1 | tee "$GITHUB_WORKSPACE/spec_lock_consensus_output.txt"
           EXIT_CODE=${PIPESTATUS[0]}
           if [ $EXIT_CODE -ne 0 ]; then
             echo "❌ blvm-consensus spec-lock verification failed"
@@ -638,41 +650,38 @@ jobs:
           fi
           echo "✅ blvm-consensus verification passed"
 
-      - name: Run blvm-spec-lock verify (blvm-node)
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          echo "🔒 Running blvm-spec-lock verification on blvm-node..."
           cd "$GITHUB_WORKSPACE"
+          echo "🔒 Running cargo-spec-lock verify on blvm-node (merged F_* + #[spec_locked])..."
           SPEC_ARGS="--crate-path ."
           if [ -f "../blvm-spec/PROTOCOL.md" ] && [ -f "../blvm-spec/ARCHITECTURE.md" ]; then
             SPEC_ARGS="$SPEC_ARGS --spec-path ../blvm-spec/PROTOCOL.md ../blvm-spec/ARCHITECTURE.md"
-            echo "Using PROTOCOL.md + ARCHITECTURE.md for spec-derived contracts"
           elif [ -f "../blvm-spec/THE_ORANGE_PAPER.md" ]; then
             SPEC_ARGS="$SPEC_ARGS --spec-path ../blvm-spec/THE_ORANGE_PAPER.md"
-            echo "Using THE_ORANGE_PAPER.md for spec-derived contracts"
           else
             echo "❌ No spec at ../blvm-spec"
             exit 1
           fi
-          export SPEC_LOCK_STRICT=1
-          cargo-spec-lock verify $SPEC_ARGS 2>&1 | tee "$GITHUB_WORKSPACE/spec_lock_node_output.txt"
+          cargo-spec-lock verify $SPEC_ARGS --timeout 120 --format human \
+            --json-out "$GITHUB_WORKSPACE/spec_lock_node_verify.json" \
+            2>&1 | tee "$GITHUB_WORKSPACE/spec_lock_node_output.txt"
           EXIT_CODE=${PIPESTATUS[0]}
           if [ $EXIT_CODE -ne 0 ]; then
             echo "❌ blvm-node spec-lock verification failed"
             exit $EXIT_CODE
           fi
           echo "✅ blvm-node verification passed"
-      
-      - name: Create spec-lock attestation data
-        run: |
-          CONSENSUS_FUNCS=$(grep -c "Status: PASSED" spec_lock_consensus_output.txt 2>/dev/null || echo "0")
-          NODE_FUNCS=$(grep -c "Status: PASSED" spec_lock_node_output.txt 2>/dev/null || echo "0")
+
+          command -v jq >/dev/null 2>&1 || { echo "❌ jq required"; exit 1; }
+          test -s "$GITHUB_WORKSPACE/spec_lock_consensus_verify.json" || { echo "❌ spec_lock_consensus_verify.json missing after verify"; exit 1; }
+          test -s "$GITHUB_WORKSPACE/spec_lock_node_verify.json" || { echo "❌ spec_lock_node_verify.json missing after verify"; exit 1; }
+          CONSENSUS_FUNCS="$(jq -r '.summary.passed // 0' "$GITHUB_WORKSPACE/spec_lock_consensus_verify.json")"
+          NODE_FUNCS="$(jq -r '.summary.passed // 0' "$GITHUB_WORKSPACE/spec_lock_node_verify.json")"
           TOTAL=$((CONSENSUS_FUNCS + NODE_FUNCS))
           echo "spec_lock_consensus_functions=$CONSENSUS_FUNCS" >> $GITHUB_ENV
           echo "spec_lock_node_functions=$NODE_FUNCS" >> $GITHUB_ENV
           echo "spec_lock_total_functions=$TOTAL" >> $GITHUB_ENV
           echo "spec_lock_verified=true" >> $GITHUB_ENV
-          HASH=$(sha256sum spec_lock_consensus_output.txt spec_lock_node_output.txt | sha256sum | cut -d' ' -f1)
+          HASH=$(sha256sum "$GITHUB_WORKSPACE/spec_lock_consensus_output.txt" "$GITHUB_WORKSPACE/spec_lock_node_output.txt" | sha256sum | cut -d' ' -f1)
           echo "spec_lock_output_hash=$HASH" >> $GITHUB_ENV
           echo "📋 Spec-lock: consensus=$CONSENSUS_FUNCS node=$NODE_FUNCS total=$TOTAL"
       
@@ -685,11 +694,24 @@ jobs:
             spec_lock_consensus_output.txt
             spec_lock_node_output.txt
           retention-days: 90
+      
+      - name: Upload spec-lock verify JSON for attestation
+        if: github.ref == 'refs/heads/main'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: spec-lock-verify-json
+          path: |
+            spec_lock_consensus_verify.json
+            spec_lock_node_verify.json
+          if-no-files-found: ignore
+          retention-days: 90
 
   fmt:
     name: Format
     needs: setup
     runs-on: [self-hosted, Linux, X64, builds]
+
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -832,7 +854,7 @@ jobs:
       - name: Run security audit
         run: |
           # Ignores live only in `.cargo/audit.toml` (single source of truth). Temporary suppressions until
-          # upstream bumps; see Cargo.toml security note and workspace docs/CONSENSUS_SECURITY_HARDENING_PLAN.md.
+          # upstream bumps; see Cargo.toml security note and docs/AUDIT_SUPPRESSIONS.md.
           cargo audit
 
   # Fuzz is skippable via `[skip_fuzz]` on push. Fuzz does not
@@ -952,6 +974,7 @@ jobs:
       - verify
       - fuzz
     runs-on: [self-hosted, Linux, X64, builds]
+
     env:
       # Use release-fast for PRs, branches — full release only for push to main
       BLVM_FAST_BUILD: ${{ ((github.event_name != 'push' || github.ref != 'refs/heads/main') && (github.event_name != 'release')) && '1' || '' }}
@@ -1343,6 +1366,14 @@ jobs:
           merge-multiple: true
           path: attestation-data
       
+      - name: Download spec-lock verify JSON (optional)
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: spec-lock-verify-json
+          path: attestation-data
+      
       - name: Collect build metadata for attestation
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
         id: metadata
@@ -1378,8 +1409,11 @@ jobs:
           
           if [ -f "attestation-data/spec_lock_consensus_output.txt" ] && [ -f "attestation-data/spec_lock_node_output.txt" ]; then
             SPEC_LOCK_VERIFIED="true"
-            SPEC_LOCK_CONSENSUS_FUNCS=$(grep -c "Status: PASSED" attestation-data/spec_lock_consensus_output.txt 2>/dev/null || echo "0")
-            SPEC_LOCK_NODE_FUNCS=$(grep -c "Status: PASSED" attestation-data/spec_lock_node_output.txt 2>/dev/null || echo "0")
+            command -v jq >/dev/null 2>&1 || { echo "❌ jq required for release attestation"; exit 1; }
+            test -s "attestation-data/spec_lock_consensus_verify.json" || { echo "❌ attestation-data/spec_lock_consensus_verify.json missing"; exit 1; }
+            test -s "attestation-data/spec_lock_node_verify.json" || { echo "❌ attestation-data/spec_lock_node_verify.json missing"; exit 1; }
+            SPEC_LOCK_CONSENSUS_FUNCS=$(jq -r '.summary.passed // 0' attestation-data/spec_lock_consensus_verify.json)
+            SPEC_LOCK_NODE_FUNCS=$(jq -r '.summary.passed // 0' attestation-data/spec_lock_node_verify.json)
             SPEC_LOCK_TOTAL=$((SPEC_LOCK_CONSENSUS_FUNCS + SPEC_LOCK_NODE_FUNCS))
             SPEC_LOCK_OUTPUT_HASH=$(sha256sum attestation-data/spec_lock_consensus_output.txt attestation-data/spec_lock_node_output.txt | sha256sum | cut -d' ' -f1)
           fi
@@ -1478,9 +1512,100 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  publish-dev:
+    name: Publish develop (crates.io)
+    needs: [build, build-dev, test, clippy, fmt, docs, security, verify, fuzz]
+    runs-on: [self-hosted, Linux, X64, builds]
+
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      (
+        (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
+        (github.event_name == 'repository_dispatch' && github.event.action == 'develop-chain')
+      ) &&
+      (github.event.head_commit == null ||
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]') &&
+        !contains(github.event.head_commit.message, '[skip release]') &&
+        !contains(github.event.head_commit.message, '[skip_publish_dev]'))) &&
+      ((github.event_name == 'workflow_dispatch' && github.event.inputs.skip_tests == 'true') ||
+       ((needs.test.result == 'success' || needs.test.result == 'skipped') &&
+        (needs.clippy.result == 'success' || needs.clippy.result == 'skipped') &&
+        (needs.fmt.result == 'success' || needs.fmt.result == 'skipped') &&
+        (needs.docs.result == 'success' || needs.docs.result == 'skipped') &&
+        (needs.security.result == 'success' || needs.security.result == 'skipped') &&
+        (needs.verify.result == 'success' || needs.verify.result == 'skipped') &&
+        (needs.fuzz.result == 'success' || needs.fuzz.result == 'skipped')))
+    outputs:
+      version: ${{ steps.dev_publish.outputs.version }}
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Strip [patch.crates-io] for crates.io-only CI
+        uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Install Rust
+        uses: BTCDecoded/rust-ci/install-rust-toolchain@main
+
+      - name: Checkout develop scripts (blvm)
+        uses: actions/checkout@v4
+        with:
+          repository: BTCDecoded/blvm
+          ref: ${{ github.ref_name == 'develop' && 'develop' || 'main' }}
+          path: _develop-blvm
+          fetch-depth: 1
+
+      - name: Check for crates.io token
+        id: token
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            cargo login "${CARGO_REGISTRY_TOKEN}"
+          fi
+
+      - name: Publish develop pre-release
+        id: dev_publish
+        if: steps.token.outputs.skip != 'true'
+        run: |
+          chmod +x _develop-blvm/scripts/*.sh
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            V="${{ github.event.client_payload.version }}"
+          else
+            V=$(bash _develop-blvm/scripts/compute-develop-version.sh)
+          fi
+          echo "version=${V}" >> "$GITHUB_OUTPUT"
+          bash _develop-blvm/scripts/ci-publish-develop.sh \
+            --scripts-dir "${GITHUB_WORKSPACE}/_develop-blvm/scripts" \
+            --wait-for blvm-consensus,blvm-protocol \
+            "${V}"
+
+      - name: Dispatch develop-chain downstream
+        if: steps.token.outputs.skip != 'true' && steps.dev_publish.outputs.version != ''
+        env:
+          REPO_ACCESS_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}
+          VERSION: ${{ steps.dev_publish.outputs.version }}
+        run: |
+          if [ -z "${REPO_ACCESS_TOKEN:-}" ]; then exit 0; fi
+          for REPO in blvm-sdk blvm; do
+            curl -sfSL -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${REPO_ACCESS_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/BTCDecoded/${REPO}/dispatches" \
+              -d "{\"event_type\":\"develop-chain\",\"client_payload\":{\"version\":\"${VERSION}\",\"source\":\"blvm-node\"}}" \
+              || echo "::warning::develop-chain dispatch to ${REPO} failed"
+          done
+
   teardown:
     name: Teardown (cleanup runner disk)
     runs-on: [self-hosted, Linux, X64, builds]
+
     if: always()
     needs: [build-dev, test, clippy, verify, fmt, docs, security, fuzz, build]
     steps:
