@@ -113,7 +113,7 @@ impl PruningManager {
 
     /// Get pruning statistics
     pub fn get_stats(&self) -> PruningStats {
-        self.stats.lock().unwrap().clone()
+        self.stats.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Get commitment store (if available)
@@ -361,7 +361,7 @@ impl PruningManager {
 
         // Update statistics
         {
-            let mut stats_guard = self.stats.lock().unwrap();
+            let mut stats_guard = self.stats.lock().unwrap_or_else(|e| e.into_inner());
             stats_guard.blocks_pruned += stats.blocks_pruned;
             stats_guard.headers_kept += stats.headers_kept;
             stats_guard.blocks_kept += stats.blocks_kept;

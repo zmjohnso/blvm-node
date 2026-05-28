@@ -20,12 +20,15 @@ use tracing::{debug, info};
 /// SECURITY: This bypasses TLS chain validation. It is intentional for the BLVM P2P
 /// transport where peers use ephemeral self-signed certificates. Trust is established
 /// at the application layer via the Bitcoin P2P version handshake and peer scoring,
-/// not via a PKI chain. Replace with certificate-pinning once peer identity is stable.
-#[cfg(feature = "quinn")]
+/// not via a PKI chain.
+///
+/// This type is **not compiled under the `production` feature** — production nodes
+/// must use a certificate-pinning or TOFU verifier instead.  See Track G / P1-S.
+#[cfg(all(feature = "quinn", not(feature = "production")))]
 #[derive(Debug)]
 struct NoServerCertVerification;
 
-#[cfg(feature = "quinn")]
+#[cfg(all(feature = "quinn", not(feature = "production")))]
 impl quinn::rustls::client::danger::ServerCertVerifier for NoServerCertVerification {
     fn verify_server_cert(
         &self,
@@ -154,17 +157,28 @@ impl Transport for QuinnTransport {
         // verification and rely on the Bitcoin-level P2P authentication (version handshake,
         // peer scoring, network magic) to establish trust.
         //
-        // TODO: Replace with certificate-pinning / TOFU once peer identity management is
-        //       implemented (track peer cert fingerprint on first connection, reject changes).
+        // Under the `production` feature this verifier is not compiled — production nodes
+        // must implement certificate-pinning or TOFU (Track G / P1-S).
         let crypto = {
             use quinn::rustls;
-            let mut tls = rustls::ClientConfig::builder()
-                .dangerous()
-                .with_custom_certificate_verifier(std::sync::Arc::new(NoServerCertVerification))
-                .with_no_client_auth();
-            tls.alpn_protocols = vec![b"blvm-p2p".to_vec()];
-            quinn::crypto::rustls::QuicClientConfig::try_from(tls)
-                .map_err(|e| anyhow::anyhow!("Failed to build Quinn TLS config: {e}"))?
+            #[cfg(feature = "production")]
+            {
+                return Err(anyhow::anyhow!(
+                    "Quinn outbound TLS: NoServerCertVerification is not available in production \
+                     builds. Implement certificate-pinning or TOFU before enabling QUIC on \
+                     production nodes."
+                ));
+            }
+            #[cfg(not(feature = "production"))]
+            {
+                let mut tls = rustls::ClientConfig::builder()
+                    .dangerous()
+                    .with_custom_certificate_verifier(std::sync::Arc::new(NoServerCertVerification))
+                    .with_no_client_auth();
+                tls.alpn_protocols = vec![b"blvm-p2p".to_vec()];
+                quinn::crypto::rustls::QuicClientConfig::try_from(tls)
+                    .map_err(|e| anyhow::anyhow!("Failed to build Quinn TLS config: {e}"))?
+            }
         };
         let client_config = quinn::ClientConfig::new(std::sync::Arc::new(crypto));
         let mut endpoint = quinn::Endpoint::client(SocketAddr::from(([0, 0, 0, 0], 0)))?;

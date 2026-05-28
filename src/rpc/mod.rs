@@ -635,6 +635,20 @@ impl RpcManager {
         // Start REST API server if enabled
         #[cfg(feature = "rest-api")]
         let rest_api_handle = if let Some(rest_api_addr) = self.rest_api_addr {
+            // Mirror the RPC safety check: refuse to expose REST on a public address
+            // without authentication.  REST POST endpoints (broadcast, mempool) are
+            // equally sensitive — an open public REST server is a network hazard.
+            if self.auth_manager.is_none()
+                && !rest_api_addr.ip().is_loopback()
+                && !self.allow_unauthenticated_rpc
+            {
+                return Err(anyhow::anyhow!(
+                    "REST API server would bind to public address {} without authentication. \
+                     Configure rpc.auth (add tokens) or call .allow_unauthenticated_rpc(true) \
+                     to explicitly opt out of this safety check.",
+                    rest_api_addr
+                ));
+            }
             if let (Some(storage), Some(mempool)) = (self.storage.as_ref(), self.mempool.as_ref()) {
                 info!("Starting REST API server on {}", rest_api_addr);
 

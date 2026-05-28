@@ -399,7 +399,10 @@ async fn handle_peer_disconnected(nm: &NetworkManager, addr: TransportAddr) {
         TransportAddr::Iroh(_) => None,
     };
     if let Some(sock) = sock_opt {
-        nm.getaddr_responded.lock().unwrap().remove(&sock);
+        nm.getaddr_responded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&sock);
 
         // Remove per-peer rate limiter entries to prevent unbounded map growth
         // on nodes with many transient peers.

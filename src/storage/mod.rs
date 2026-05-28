@@ -86,8 +86,12 @@ impl Storage {
     /// falls back to alternatives if the primary fails.
     ///
     /// If existing node data is detected, will use RocksDB to read it.
-    /// Defaults to [`CoreDataNetwork::Mainnet`] for Core data detection; prefer
-    /// [`Storage::new_with_network`] when the runtime network is known.
+    ///
+    /// **Prefer [`Storage::new_with_network`] whenever the runtime network is known.**
+    /// This function defaults to [`CoreDataNetwork::Mainnet`] for Bitcoin Core data detection,
+    /// which means testnet/regtest Core datadirs will never be auto-detected when called
+    /// through this path.  Only use `Storage::new` for tests or when the network is
+    /// genuinely unavailable at construction time.
     pub fn new<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
         #[cfg(feature = "rocksdb")]
         {

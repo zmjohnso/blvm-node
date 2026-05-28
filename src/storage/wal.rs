@@ -135,7 +135,16 @@ pub struct WalConfig {
     pub flush_interval_blocks: u64,
     /// Maximum operations to buffer before forcing flush
     pub max_buffered_ops: usize,
-    /// Whether to sync WAL file after each write (slower but safer)
+    /// Whether to fsync the WAL file after each write.
+    ///
+    /// **`false` (default):** OS page-cache is relied upon for durability.  A crash between
+    /// the WAL write and the subsequent DB flush can lose up to `flush_interval_blocks` blocks
+    /// of state, requiring re-sync from a peer.  Acceptable during IBD where speed matters.
+    ///
+    /// **`true` (production full nodes):** Each WAL entry is fsynced before the caller
+    /// returns.  This guarantees that committed blocks survive a power loss at the cost of
+    /// significantly lower write throughput.  Enable this for nodes that must not re-sync
+    /// after an unclean shutdown (e.g. on-chain watchers, lightning backends).
     pub sync_wal: bool,
 }
 
@@ -144,7 +153,7 @@ impl Default for WalConfig {
         Self {
             flush_interval_blocks: 1000,
             max_buffered_ops: 100_000,
-            sync_wal: false, // Trade some durability for speed during IBD
+            sync_wal: false,
         }
     }
 }
