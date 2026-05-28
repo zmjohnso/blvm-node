@@ -2,7 +2,7 @@
 //!
 //! Integrates Bitcoin Core detection and format parsing with the storage layer.
 
-use crate::storage::bitcoin_core_detection::{BitcoinCoreDetection, BitcoinCoreNetwork};
+use crate::storage::bitcoin_detection::{BitcoinCoreDetection, CoreDataNetwork};
 use crate::storage::database::{create_database, DatabaseBackend};
 use anyhow::Result;
 use std::path::Path;
@@ -20,7 +20,7 @@ impl BitcoinCoreStorage {
     #[cfg(feature = "rocksdb")]
     pub fn detect_and_open(
         data_dir: &Path,
-        network: BitcoinCoreNetwork,
+        network: CoreDataNetwork,
     ) -> Result<Option<DatabaseBackend>> {
         // Check for existing BLVM database first
         if Self::has_blvm_database(data_dir) {
@@ -45,7 +45,7 @@ impl BitcoinCoreStorage {
     #[cfg(not(feature = "rocksdb"))]
     pub fn detect_and_open(
         _data_dir: &Path,
-        _network: BitcoinCoreNetwork,
+        _network: CoreDataNetwork,
     ) -> Result<Option<DatabaseBackend>> {
         // RocksDB not available, cannot detect Bitcoin Core
         Ok(None)
@@ -80,7 +80,7 @@ impl BitcoinCoreStorage {
     #[cfg(feature = "rocksdb")]
     pub fn open_bitcoin_core_database(
         data_dir: &Path,
-        network: BitcoinCoreNetwork,
+        network: CoreDataNetwork,
     ) -> Result<Box<dyn crate::storage::database::Database>> {
         use crate::storage::database::rocksdb_impl::RocksDBDatabase;
 
@@ -100,7 +100,7 @@ impl BitcoinCoreStorage {
     #[cfg(not(feature = "rocksdb"))]
     pub fn open_bitcoin_core_database(
         _data_dir: &Path,
-        _network: BitcoinCoreNetwork,
+        _network: CoreDataNetwork,
     ) -> Result<Box<dyn crate::storage::database::Database>> {
         Err(anyhow::anyhow!("RocksDB feature not enabled"))
     }

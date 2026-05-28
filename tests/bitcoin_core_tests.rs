@@ -5,10 +5,10 @@
 #[cfg(feature = "rocksdb")]
 mod bitcoin_core_tests {
     use blvm_node::storage::bitcoin_core_blocks::BitcoinCoreBlockReader;
-    use blvm_node::storage::bitcoin_core_detection::{BitcoinCoreDetection, BitcoinCoreNetwork};
     use blvm_node::storage::bitcoin_core_format::{
         convert_key, get_key_prefix, parse_block_index, parse_coin,
     };
+    use blvm_node::storage::bitcoin_detection::{BitcoinCoreDetection, CoreDataNetwork};
     use std::fs::{create_dir_all, File};
     use std::io::Write;
     use tempfile::TempDir;
@@ -16,7 +16,7 @@ mod bitcoin_core_tests {
     #[test]
     fn test_bitcoin_core_detection_paths() {
         // Test that detection doesn't crash on non-existent paths
-        let result = BitcoinCoreDetection::detect_data_dir(BitcoinCoreNetwork::Mainnet);
+        let result = BitcoinCoreDetection::detect_data_dir(CoreDataNetwork::Mainnet);
         // Should return Ok(None) if not found, not an error
         assert!(result.is_ok());
     }
@@ -29,13 +29,13 @@ mod bitcoin_core_tests {
         let mainnet_path = temp_dir.path().join(".bitcoin");
         create_dir_all(&mainnet_path).unwrap();
         let detected = BitcoinCoreDetection::detect_network(&mainnet_path);
-        assert_eq!(detected, Some(BitcoinCoreNetwork::Mainnet));
+        assert_eq!(detected, Some(CoreDataNetwork::Mainnet));
 
         // Test testnet detection
         let testnet_path = temp_dir.path().join("testnet3");
         create_dir_all(&testnet_path).unwrap();
         let detected = BitcoinCoreDetection::detect_network(&testnet_path);
-        assert_eq!(detected, Some(BitcoinCoreNetwork::Testnet));
+        assert_eq!(detected, Some(CoreDataNetwork::Testnet));
     }
 
     // Note: read_varint is private, so we test it indirectly through parse_coin
@@ -151,7 +151,7 @@ mod bitcoin_core_tests {
         let cache_dir = temp_dir.path().join("cache");
         let reader = BitcoinCoreBlockReader::new_with_cache(
             &blocks_dir,
-            BitcoinCoreNetwork::Mainnet,
+            CoreDataNetwork::Mainnet,
             Some(&cache_dir),
         );
         assert!(reader.is_ok());
@@ -189,7 +189,7 @@ mod bitcoin_core_tests {
         // First reader - builds index
         let reader1 = BitcoinCoreBlockReader::new_with_cache(
             &blocks_dir,
-            BitcoinCoreNetwork::Mainnet,
+            CoreDataNetwork::Mainnet,
             Some(&cache_dir),
         )
         .unwrap();
@@ -198,7 +198,7 @@ mod bitcoin_core_tests {
         // Second reader - should load from cache
         let reader2 = BitcoinCoreBlockReader::new_with_cache(
             &blocks_dir,
-            BitcoinCoreNetwork::Mainnet,
+            CoreDataNetwork::Mainnet,
             Some(&cache_dir),
         )
         .unwrap();
@@ -213,14 +213,14 @@ mod bitcoin_core_tests {
     #[test]
     fn test_bitcoin_core_not_available() {
         // Tests that Bitcoin Core features are not available when rocksdb feature is disabled
-        use blvm_node::storage::bitcoin_core_detection::BitcoinCoreNetwork;
+        use blvm_node::storage::bitcoin_core_detection::CoreDataNetwork;
         use blvm_node::storage::bitcoin_core_storage::BitcoinCoreStorage;
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let result = BitcoinCoreStorage::open_bitcoin_core_database(
             temp_dir.path(),
-            BitcoinCoreNetwork::Mainnet,
+            CoreDataNetwork::Mainnet,
         );
         assert!(result.is_err());
     }

@@ -5,7 +5,7 @@
 //! - Block size (4 bytes, little-endian)
 //! - Block data (variable length)
 
-use crate::storage::bitcoin_core_detection::BitcoinCoreNetwork;
+use crate::storage::bitcoin_detection::CoreDataNetwork;
 use anyhow::{Context, Result};
 use blvm_protocol::serialization::block::deserialize_block_with_witnesses;
 use blvm_protocol::{Block, Hash};
@@ -46,7 +46,7 @@ struct BlockIndexCache {
 /// Builds an index of block hashes to file locations for fast lookups.
 pub struct BitcoinCoreBlockReader {
     blocks_dir: PathBuf,
-    network: BitcoinCoreNetwork,
+    network: CoreDataNetwork,
     /// Index mapping block hash to file location
     /// Lazy-loaded on first access, optionally persisted to disk
     block_index: Arc<Mutex<Option<HashMap<Hash, BlockLocation>>>>,
@@ -58,7 +58,7 @@ impl BitcoinCoreBlockReader {
     /// Create a new block file reader
     ///
     /// `blocks_dir` should point to the `blocks/` directory containing `blk*.dat` files.
-    pub fn new(blocks_dir: &Path, network: BitcoinCoreNetwork) -> Result<Self> {
+    pub fn new(blocks_dir: &Path, network: CoreDataNetwork) -> Result<Self> {
         Self::new_with_cache(blocks_dir, network, None)
     }
 
@@ -68,7 +68,7 @@ impl BitcoinCoreBlockReader {
     /// for faster subsequent loads. The cache file is named `block_index_{network}.bin`.
     pub fn new_with_cache(
         blocks_dir: &Path,
-        network: BitcoinCoreNetwork,
+        network: CoreDataNetwork,
         cache_dir: Option<&Path>,
     ) -> Result<Self> {
         if !blocks_dir.exists() {
@@ -80,10 +80,10 @@ impl BitcoinCoreBlockReader {
 
         let index_cache_path = cache_dir.map(|dir| {
             let network_str = match network {
-                BitcoinCoreNetwork::Mainnet => "mainnet",
-                BitcoinCoreNetwork::Testnet => "testnet",
-                BitcoinCoreNetwork::Regtest => "regtest",
-                BitcoinCoreNetwork::Signet => "signet",
+                CoreDataNetwork::Mainnet => "mainnet",
+                CoreDataNetwork::Testnet => "testnet",
+                CoreDataNetwork::Regtest => "regtest",
+                CoreDataNetwork::Signet => "signet",
             };
             dir.join(format!("block_index_{network_str}.bin"))
         });
@@ -99,10 +99,10 @@ impl BitcoinCoreBlockReader {
     /// Get the magic bytes for the network
     fn get_magic(&self) -> &[u8; 4] {
         match self.network {
-            BitcoinCoreNetwork::Mainnet => &MAGIC_MAINNET,
-            BitcoinCoreNetwork::Testnet => &MAGIC_TESTNET,
-            BitcoinCoreNetwork::Regtest => &MAGIC_REGTEST,
-            BitcoinCoreNetwork::Signet => &MAGIC_SIGNET,
+            CoreDataNetwork::Mainnet => &MAGIC_MAINNET,
+            CoreDataNetwork::Testnet => &MAGIC_TESTNET,
+            CoreDataNetwork::Regtest => &MAGIC_REGTEST,
+            CoreDataNetwork::Signet => &MAGIC_SIGNET,
         }
     }
 
@@ -293,10 +293,10 @@ impl BitcoinCoreBlockReader {
 
         // Verify cache is for the correct network and blocks directory
         let network_str = match self.network {
-            BitcoinCoreNetwork::Mainnet => "mainnet",
-            BitcoinCoreNetwork::Testnet => "testnet",
-            BitcoinCoreNetwork::Regtest => "regtest",
-            BitcoinCoreNetwork::Signet => "signet",
+            CoreDataNetwork::Mainnet => "mainnet",
+            CoreDataNetwork::Testnet => "testnet",
+            CoreDataNetwork::Regtest => "regtest",
+            CoreDataNetwork::Signet => "signet",
         };
 
         if cache.network != network_str {
@@ -335,10 +335,10 @@ impl BitcoinCoreBlockReader {
         }
 
         let network_str = match self.network {
-            BitcoinCoreNetwork::Mainnet => "mainnet",
-            BitcoinCoreNetwork::Testnet => "testnet",
-            BitcoinCoreNetwork::Regtest => "regtest",
-            BitcoinCoreNetwork::Signet => "signet",
+            CoreDataNetwork::Mainnet => "mainnet",
+            CoreDataNetwork::Testnet => "testnet",
+            CoreDataNetwork::Regtest => "regtest",
+            CoreDataNetwork::Signet => "signet",
         };
 
         let cache = BlockIndexCache {
@@ -451,7 +451,7 @@ mod tests {
         std::fs::create_dir_all(&blocks_dir).unwrap();
 
         // Test that reader can be created
-        let reader = BitcoinCoreBlockReader::new(&blocks_dir, BitcoinCoreNetwork::Mainnet);
+        let reader = BitcoinCoreBlockReader::new(&blocks_dir, CoreDataNetwork::Mainnet);
         assert!(reader.is_ok());
 
         let reader = reader.unwrap();
@@ -465,7 +465,7 @@ mod tests {
         let blocks_dir = temp_dir.path().join("nonexistent");
 
         // Test that reader fails gracefully for nonexistent directory
-        let reader = BitcoinCoreBlockReader::new(&blocks_dir, BitcoinCoreNetwork::Mainnet);
+        let reader = BitcoinCoreBlockReader::new(&blocks_dir, CoreDataNetwork::Mainnet);
         assert!(reader.is_err());
     }
 }

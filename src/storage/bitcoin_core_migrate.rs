@@ -3,9 +3,9 @@
 //! Used by `blvm migrate core` and the standalone migrate-bitcoin-core binary.
 
 use super::bitcoin_core_blocks::BitcoinCoreBlockReader;
-use super::bitcoin_core_detection::{BitcoinCoreDetection, BitcoinCoreNetwork};
 use super::bitcoin_core_format::{convert_key, get_key_prefix, parse_block_index, parse_coin};
 use super::bitcoin_core_storage::BitcoinCoreStorage;
+use super::bitcoin_detection::{BitcoinCoreDetection, CoreDataNetwork};
 use super::blockstore::BlockStore;
 use super::database::{create_database, DatabaseBackend};
 use anyhow::{Context, Result};
@@ -21,7 +21,7 @@ use tracing::{info, warn};
 pub struct MigrateCoreArgs {
     pub source: PathBuf,
     pub destination: PathBuf,
-    pub network: BitcoinCoreNetwork,
+    pub network: CoreDataNetwork,
     pub verify: bool,
     pub verbose: bool,
 }
@@ -69,7 +69,7 @@ pub fn run_migrate_core(args: MigrateCoreArgs) -> Result<()> {
 struct Migrator {
     source_dir: PathBuf,
     _dest_dir: PathBuf,
-    _network: BitcoinCoreNetwork,
+    _network: CoreDataNetwork,
     source_db: Arc<dyn crate::storage::database::Database>,
     dest_db: Arc<dyn crate::storage::database::Database>,
     progress: Arc<MigrationProgress>,
@@ -83,7 +83,7 @@ struct MigrationProgress {
 }
 
 impl Migrator {
-    fn new(source_dir: &Path, dest_dir: &Path, network: BitcoinCoreNetwork) -> Result<Self> {
+    fn new(source_dir: &Path, dest_dir: &Path, network: CoreDataNetwork) -> Result<Self> {
         info!("Opening source database...");
         let source_db = Arc::from(BitcoinCoreStorage::open_bitcoin_core_database(
             source_dir, network,

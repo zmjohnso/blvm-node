@@ -12,47 +12,50 @@ pub enum DatabaseFormat {
     LevelDB,
 }
 
-/// Bitcoin Core network type
+/// Network selector for Bitcoin Core data-directory layout.
+///
+/// Not the same as `blvm_protocol::types::Network` — this enum also covers `Signet`,
+/// which is not a BLVM protocol network but is a valid Bitcoin Core data directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BitcoinCoreNetwork {
+pub enum CoreDataNetwork {
     Mainnet,
     Testnet,
     Regtest,
     Signet,
 }
 
-impl BitcoinCoreNetwork {
+impl CoreDataNetwork {
     fn directory_name(&self) -> &'static str {
         match self {
-            BitcoinCoreNetwork::Mainnet => "",
-            BitcoinCoreNetwork::Testnet => "testnet3",
-            BitcoinCoreNetwork::Regtest => "regtest",
-            BitcoinCoreNetwork::Signet => "signet",
+            CoreDataNetwork::Mainnet => "",
+            CoreDataNetwork::Testnet => "testnet3",
+            CoreDataNetwork::Regtest => "regtest",
+            CoreDataNetwork::Signet => "signet",
         }
     }
 }
 
-impl std::str::FromStr for BitcoinCoreNetwork {
+impl std::str::FromStr for CoreDataNetwork {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "mainnet" => Ok(BitcoinCoreNetwork::Mainnet),
-            "testnet" => Ok(BitcoinCoreNetwork::Testnet),
-            "regtest" => Ok(BitcoinCoreNetwork::Regtest),
-            "signet" => Ok(BitcoinCoreNetwork::Signet),
+            "mainnet" => Ok(CoreDataNetwork::Mainnet),
+            "testnet" => Ok(CoreDataNetwork::Testnet),
+            "regtest" => Ok(CoreDataNetwork::Regtest),
+            "signet" => Ok(CoreDataNetwork::Signet),
             _ => Err(format!("Unknown network: {s}")),
         }
     }
 }
 
-impl std::fmt::Display for BitcoinCoreNetwork {
+impl std::fmt::Display for CoreDataNetwork {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BitcoinCoreNetwork::Mainnet => write!(f, "mainnet"),
-            BitcoinCoreNetwork::Testnet => write!(f, "testnet"),
-            BitcoinCoreNetwork::Regtest => write!(f, "regtest"),
-            BitcoinCoreNetwork::Signet => write!(f, "signet"),
+            CoreDataNetwork::Mainnet => write!(f, "mainnet"),
+            CoreDataNetwork::Testnet => write!(f, "testnet"),
+            CoreDataNetwork::Regtest => write!(f, "regtest"),
+            CoreDataNetwork::Signet => write!(f, "signet"),
         }
     }
 }
@@ -65,7 +68,7 @@ impl BitcoinCoreDetection {
     ///
     /// Checks standard Bitcoin Core paths for the given network.
     /// Returns the path if found, None otherwise.
-    pub fn detect_data_dir(network: BitcoinCoreNetwork) -> Result<Option<PathBuf>> {
+    pub fn detect_data_dir(network: CoreDataNetwork) -> Result<Option<PathBuf>> {
         let possible_dirs = Self::get_standard_paths(network);
 
         for dir in possible_dirs.into_iter().flatten() {
@@ -78,13 +81,13 @@ impl BitcoinCoreDetection {
     }
 
     /// Get standard Bitcoin Core data directory paths
-    fn get_standard_paths(network: BitcoinCoreNetwork) -> Vec<Option<PathBuf>> {
+    fn get_standard_paths(network: CoreDataNetwork) -> Vec<Option<PathBuf>> {
         let mut paths = Vec::new();
 
         // Standard home directory paths
         if let Some(home) = dirs::home_dir() {
             let base = home.join(".bitcoin");
-            if network == BitcoinCoreNetwork::Mainnet {
+            if network == CoreDataNetwork::Mainnet {
                 paths.push(Some(base.clone()));
             } else {
                 paths.push(Some(base.join(network.directory_name())));
@@ -93,7 +96,7 @@ impl BitcoinCoreDetection {
 
         // System-wide paths
         paths.push(Some(PathBuf::from("/var/lib/bitcoind")));
-        if network != BitcoinCoreNetwork::Mainnet {
+        if network != CoreDataNetwork::Mainnet {
             paths.push(Some(
                 PathBuf::from("/var/lib/bitcoind").join(network.directory_name()),
             ));
@@ -103,7 +106,7 @@ impl BitcoinCoreDetection {
     }
 
     /// Check if directory contains Bitcoin Core data
-    fn is_bitcoin_core_dir(dir: &Path, network: BitcoinCoreNetwork) -> bool {
+    fn is_bitcoin_core_dir(dir: &Path, network: CoreDataNetwork) -> bool {
         // Check for chainstate database (required)
         let chainstate = dir.join("chainstate");
         if !chainstate.exists() {
@@ -156,13 +159,13 @@ impl BitcoinCoreDetection {
     ///
     /// Attempts to detect the network by checking directory structure
     /// and configuration files.
-    pub fn detect_network(data_dir: &Path) -> Option<BitcoinCoreNetwork> {
+    pub fn detect_network(data_dir: &Path) -> Option<CoreDataNetwork> {
         // Check directory name
         if let Some(dir_name) = data_dir.file_name().and_then(|n| n.to_str()) {
             match dir_name {
-                "testnet3" => return Some(BitcoinCoreNetwork::Testnet),
-                "regtest" => return Some(BitcoinCoreNetwork::Regtest),
-                "signet" => return Some(BitcoinCoreNetwork::Signet),
+                "testnet3" => return Some(CoreDataNetwork::Testnet),
+                "regtest" => return Some(CoreDataNetwork::Regtest),
+                "signet" => return Some(CoreDataNetwork::Signet),
                 _ => {}
             }
         }
@@ -174,10 +177,10 @@ impl BitcoinCoreDetection {
                     // Check if we're in a subdirectory
                     if let Some(dir_name) = data_dir.file_name().and_then(|n| n.to_str()) {
                         match dir_name {
-                            "testnet3" => return Some(BitcoinCoreNetwork::Testnet),
-                            "regtest" => return Some(BitcoinCoreNetwork::Regtest),
-                            "signet" => return Some(BitcoinCoreNetwork::Signet),
-                            _ => return Some(BitcoinCoreNetwork::Mainnet),
+                            "testnet3" => return Some(CoreDataNetwork::Testnet),
+                            "regtest" => return Some(CoreDataNetwork::Regtest),
+                            "signet" => return Some(CoreDataNetwork::Signet),
+                            _ => return Some(CoreDataNetwork::Mainnet),
                         }
                     }
                 }
@@ -185,7 +188,7 @@ impl BitcoinCoreDetection {
         }
 
         // Default to mainnet if we can't determine
-        Some(BitcoinCoreNetwork::Mainnet)
+        Some(CoreDataNetwork::Mainnet)
     }
 
     /// Verify database integrity
@@ -237,13 +240,13 @@ mod tests {
 
         assert_eq!(
             BitcoinCoreDetection::detect_network(&testnet_path),
-            Some(BitcoinCoreNetwork::Testnet)
+            Some(CoreDataNetwork::Testnet)
         );
     }
 
     #[test]
     fn test_get_standard_paths() {
-        let paths = BitcoinCoreDetection::get_standard_paths(BitcoinCoreNetwork::Mainnet);
+        let paths = BitcoinCoreDetection::get_standard_paths(CoreDataNetwork::Mainnet);
         assert!(!paths.is_empty());
     }
 }

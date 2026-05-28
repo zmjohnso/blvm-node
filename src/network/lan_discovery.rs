@@ -8,7 +8,7 @@
 //! This enables massive IBD speedups when a local node or other
 //! Bitcoin node is available on the LAN (e.g., Start9, Umbrel, RaspiBlitz).
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -21,14 +21,27 @@ const SCAN_TIMEOUT_MS: u64 = 100;
 /// Maximum number of concurrent scans
 const MAX_CONCURRENT_SCANS: usize = 64;
 
+/// Detect the primary outbound local IPv4 address using a non-transmitting UDP socket.
+///
+/// Connects to an external address (never sends data) so the OS selects the right
+/// local interface, then reads the bound local address back.
+fn local_outbound_ipv4() -> Option<Ipv4Addr> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    // Port 53 (DNS) — nothing is actually sent; the connect just resolves the route.
+    socket.connect("8.8.8.8:53").ok()?;
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) => Some(ip),
+        IpAddr::V6(_) => None,
+    }
+}
+
 /// Get local network interfaces and their IPv4 addresses
 ///
 /// Returns a list of (interface_ip, subnet_mask) tuples for private networks only
 fn get_local_interfaces() -> Vec<(Ipv4Addr, Ipv4Addr)> {
     let mut interfaces = Vec::new();
 
-    // Use the local-ip-address crate to get interface IPs
-    if let Ok(IpAddr::V4(ipv4)) = local_ip_address::local_ip() {
+    if let Some(ipv4) = local_outbound_ipv4() {
         if ipv4.is_private() {
             // Assume /24 subnet (most common for home networks)
             let mask = Ipv4Addr::new(255, 255, 255, 0);

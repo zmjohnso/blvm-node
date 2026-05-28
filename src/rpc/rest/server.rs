@@ -7,6 +7,7 @@ use crate::network::dos_protection::ConnectionRateLimiter;
 use crate::node::mempool::MempoolManager;
 use crate::rpc::{auth, blockchain, mempool, mining, network, rawtx};
 use crate::storage::Storage;
+use crate::utils::new_request_id;
 use anyhow::Result;
 use bytes::Bytes;
 use http_body_util::Limited;
@@ -21,7 +22,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{debug, error, info, warn};
-use uuid::Uuid;
 
 use super::addresses;
 use super::blocks;
@@ -200,7 +200,7 @@ impl RestApiServer {
         let path = uri.path();
 
         // Generate request ID for tracing
-        let request_id = Uuid::new_v4().to_string();
+        let request_id = new_request_id();
 
         debug!(
             "REST API {} {} from {} (request_id: {})",

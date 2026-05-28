@@ -21,10 +21,54 @@ use crate::storage::Storage;
 use crate::utils::{storage_timeout_from_config, with_custom_timeout};
 use hex;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::result::Result;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, warn};
+
+/// Decode a Base58Check-encoded string.
+///
+/// Returns the decoded payload (without the 4-byte checksum suffix).
+/// Returns `None` if the input is not valid Base58 or the checksum does not match.
+fn base58check_decode(s: &str) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+    // Count leading '1's (each encodes a leading zero byte).
+    let leading_zeros = s.bytes().take_while(|&b| b == b'1').count();
+
+    // Decode each character to its Base58 digit.
+    let mut big: Vec<u8> = Vec::new();
+    for &byte in s.as_bytes() {
+        let digit = ALPHABET.iter().position(|&a| a == byte)? as u64;
+        let mut carry = digit;
+        for val in big.iter_mut().rev() {
+            carry += (*val as u64) * 58;
+            *val = (carry & 0xff) as u8;
+            carry >>= 8;
+        }
+        while carry > 0 {
+            big.insert(0, (carry & 0xff) as u8);
+            carry >>= 8;
+        }
+    }
+
+    // Prepend the leading zero bytes.
+    let mut decoded = vec![0u8; leading_zeros];
+    decoded.extend_from_slice(&big);
+
+    // Last 4 bytes are the checksum.
+    if decoded.len() < 4 {
+        return None;
+    }
+    let (payload, checksum) = decoded.split_at(decoded.len() - 4);
+    let hash1 = Sha256::digest(payload);
+    let hash2 = Sha256::digest(hash1);
+    if &hash2[..4] != checksum {
+        return None;
+    }
+    Some(payload.to_vec())
+}
 
 /// Decode a Bitcoin address to `script_pubkey` (Bech32/Bech32m and legacy Base58Check).
 pub(crate) fn address_string_to_script_pubkey(address: &str) -> Result<Vec<u8>, RpcError> {
@@ -52,9 +96,9 @@ pub(crate) fn address_string_to_script_pubkey(address: &str) -> Result<Vec<u8>, 
             )),
         }
     } else {
-        let decoded = match bs58::decode(address).with_check(None).into_vec() {
-            Ok(v) => v,
-            Err(_) => {
+        let decoded = match base58check_decode(address) {
+            Some(v) => v,
+            None => {
                 return Err(RpcError::invalid_address_format(
                     address,
                     Some("Invalid address: not Bech32/Bech32m and not valid Base58Check"),

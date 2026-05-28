@@ -10,6 +10,7 @@ pub mod lock;
 pub mod logging;
 pub mod option;
 pub mod ram_tier;
+pub mod request_id;
 pub mod retry;
 pub mod signal;
 pub mod time;
@@ -36,6 +37,7 @@ pub use lock::{try_with_lock_timeout, with_lock, with_read_lock, with_write_lock
 pub use logging::init_json_logging;
 pub use logging::{init_logging, init_logging_from_config, init_module_logging};
 pub use option::{map_or_default, option_to_result, or_else, unwrap_or_default_with};
+pub use request_id::new_request_id;
 pub use retry::{retry_async_with_backoff, retry_with_backoff, RetryConfig};
 pub use signal::{create_shutdown_receiver, wait_for_shutdown_signal};
 pub use time::{

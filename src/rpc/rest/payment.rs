@@ -11,6 +11,7 @@ use crate::rpc::payment::DEFAULT_SAFE_DEPTH;
 use crate::rpc::rest::types::{
     rest_error_failed, rest_error_invalid, ApiError, ApiResponse, ErrorDetails, ResponseMeta,
 };
+use crate::utils::new_request_id;
 use blvm_protocol::payment::PaymentOutput;
 use bytes::Bytes;
 use http_body_util::Full;
@@ -19,7 +20,6 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, error};
-use uuid::Uuid;
 
 /// Handle payment REST API requests
 pub async fn handle_payment_request(
@@ -28,7 +28,7 @@ pub async fn handle_payment_request(
     path: &str,
     body: Option<Value>,
 ) -> Response<Full<Bytes>> {
-    let request_id = Uuid::new_v4().to_string();
+    let request_id = new_request_id();
 
     match (method, path) {
         // POST /api/v1/payments - Create payment request

@@ -5,8 +5,8 @@
 #![cfg(feature = "rocksdb")]
 
 use anyhow::Result;
-use blvm_node::storage::bitcoin_core_detection::BitcoinCoreNetwork;
 use blvm_node::storage::bitcoin_core_migrate::{run_migrate_core, MigrateCoreArgs};
+use blvm_node::storage::bitcoin_detection::CoreDataNetwork;
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -24,7 +24,7 @@ struct Args {
 
     /// Network type
     #[arg(short, long, default_value = "mainnet")]
-    network: BitcoinCoreNetwork,
+    network: CoreDataNetwork,
 
     /// Verify migrated data
     #[arg(short, long)]
@@ -41,12 +41,12 @@ fn main() -> Result<()> {
     let source = if let Some(dir) = &args.source {
         PathBuf::from(dir)
     } else {
-        blvm_node::storage::bitcoin_core_detection::BitcoinCoreDetection::detect_data_dir(
-            args.network,
-        )?
-        .ok_or_else(|| {
-            anyhow::anyhow!("Bitcoin Core data directory not found. Use --source to specify path.")
-        })?
+        blvm_node::storage::bitcoin_detection::BitcoinCoreDetection::detect_data_dir(args.network)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Bitcoin Core data directory not found. Use --source to specify path."
+                )
+            })?
     };
 
     run_migrate_core(MigrateCoreArgs {

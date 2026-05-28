@@ -132,38 +132,41 @@ impl MempoolManager {
     /// Wire the live UTXO set into the mempool so RBF fee checks use real values.
     /// Call this once after constructing MempoolManager and before the first transaction.
     pub fn set_utxo_set_arc(&self, utxo_set: Arc<tokio::sync::Mutex<UtxoSet>>) {
-        *self.utxo_set_arc.write().unwrap() = Some(utxo_set);
+        *self.utxo_set_arc.write().unwrap_or_else(|e| e.into_inner()) = Some(utxo_set);
     }
 
     /// Set event publisher for mempool events
     /// Uses interior mutability so it can be called even when MempoolManager is in an Arc
     pub fn set_event_publisher(&self, event_publisher: Option<Arc<EventPublisher>>) {
-        *self.event_publisher.write().unwrap() = event_publisher;
+        *self
+            .event_publisher
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = event_publisher;
     }
 
     /// Set RBF configuration
     /// Uses interior mutability so it can be called even when MempoolManager is in an Arc
     pub fn set_rbf_config(&self, rbf_config: Option<RbfConfig>) {
-        *self.rbf_config.write().unwrap() = rbf_config;
+        *self.rbf_config.write().unwrap_or_else(|e| e.into_inner()) = rbf_config;
     }
 
     /// Set mempool policy configuration
     /// Uses interior mutability so it can be called even when MempoolManager is in an Arc
     pub fn set_policy_config(&self, policy_config: Option<MempoolPolicyConfig>) {
-        *self.policy_config.write().unwrap() = policy_config;
+        *self
+            .policy_config
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = policy_config;
     }
 
     /// Lock pool for access (transactions + spent_outputs)
     fn pool_lock(&self) -> std::sync::MutexGuard<'_, MempoolPool> {
-        self.pool.lock().unwrap()
+        self.pool.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Get current timestamp (Unix seconds)
     fn current_timestamp() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO)
-            .as_secs()
+        crate::utils::time::current_timestamp()
     }
 
     /// Start the mempool manager
@@ -242,7 +245,7 @@ impl MempoolManager {
         let mut to_remove = Vec::with_capacity(estimated_removals);
 
         {
-            let timestamps = self.tx_timestamps.read().unwrap();
+            let timestamps = self.tx_timestamps.read().unwrap_or_else(|e| e.into_inner());
             for (hash, timestamp) in timestamps.iter() {
                 if current_time.saturating_sub(*timestamp) > expiry_time {
                     to_remove.push(*hash);
@@ -283,7 +286,11 @@ impl MempoolManager {
         }
 
         // Publish MempoolThresholdExceeded for module event subscribers
-        if let Some(ref event_pub) = *self.event_publisher.read().unwrap() {
+        if let Some(ref event_pub) = *self
+            .event_publisher
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+        {
             let threshold = policy.max_mempool_txs;
             let current = current_tx_count;
             let event_pub_clone = Arc::clone(event_pub);
@@ -336,7 +343,11 @@ impl MempoolManager {
         // Publish FeeRateChanged when min fee rate increased due to eviction
         let new_min_fee_rate = self.get_min_fee_rate_sat_per_vb();
         if new_min_fee_rate != old_min_fee_rate {
-            if let Some(ref event_pub) = *self.event_publisher.read().unwrap() {
+            if let Some(ref event_pub) = *self
+                .event_publisher
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+            {
                 let old_f64 = old_min_fee_rate as f64;
                 let new_f64 = new_min_fee_rate as f64;
                 let mempool_size = self.pool_lock().transactions.len();
@@ -354,7 +365,7 @@ impl MempoolManager {
 
     /// Get the minimum fee rate (sat/vB) in the mempool, or 0 if empty.
     fn get_min_fee_rate_sat_per_vb(&self) -> u64 {
-        let fee_index = self.fee_index.read().unwrap();
+        let fee_index = self.fee_index.read().unwrap_or_else(|e| e.into_inner());
         fee_index
             .iter()
             .last()
@@ -417,7 +428,10 @@ impl MempoolManager {
 
             // Don't evict if it has descendants (would orphan them)
             let has_descendants = {
-                let descendants = self.tx_descendants.read().unwrap();
+                let descendants = self
+                    .tx_descendants
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
                 descendants
                     .get(&hash)
                     .map(|d| !d.is_empty())
@@ -445,7 +459,7 @@ impl MempoolManager {
 
         // Get all transactions with timestamps, sorted by age (oldest first)
         let mut tx_ages: Vec<(Hash, u64, usize)> = {
-            let timestamps = self.tx_timestamps.read().unwrap();
+            let timestamps = self.tx_timestamps.read().unwrap_or_else(|e| e.into_inner());
             self.pool_lock()
                 .transactions
                 .iter()
@@ -472,7 +486,10 @@ impl MempoolManager {
 
             // Don't evict if it has descendants
             let has_descendants = {
-                let descendants = self.tx_descendants.read().unwrap();
+                let descendants = self
+                    .tx_descendants
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
                 descendants
                     .get(&hash)
                     .map(|d| !d.is_empty())
@@ -523,7 +540,10 @@ impl MempoolManager {
 
             // Don't evict if it has descendants
             let has_descendants = {
-                let descendants = self.tx_descendants.read().unwrap();
+                let descendants = self
+                    .tx_descendants
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
                 descendants
                     .get(&hash)
                     .map(|d| !d.is_empty())
@@ -555,8 +575,11 @@ impl MempoolManager {
 
         // Get all transactions with no descendants, sorted by fee rate (lowest first)
         let mut tx_no_descendants: Vec<(Hash, u64, usize)> = {
-            let descendants = self.tx_descendants.read().unwrap();
-            let fee_cache = self.fee_cache.read().unwrap();
+            let descendants = self
+                .tx_descendants
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            let fee_cache = self.fee_cache.read().unwrap_or_else(|e| e.into_inner());
 
             self.pool_lock()
                 .transactions
@@ -609,8 +632,8 @@ impl MempoolManager {
         // Calculate score: lower fee rate + older age = higher eviction priority
         let current_time = Self::current_timestamp();
         let mut tx_scores: Vec<(Hash, u64, usize)> = {
-            let timestamps = self.tx_timestamps.read().unwrap();
-            let fee_cache = self.fee_cache.read().unwrap();
+            let timestamps = self.tx_timestamps.read().unwrap_or_else(|e| e.into_inner());
+            let fee_cache = self.fee_cache.read().unwrap_or_else(|e| e.into_inner());
 
             self.pool_lock()
                 .transactions
@@ -657,7 +680,10 @@ impl MempoolManager {
 
             // Don't evict if it has descendants
             let has_descendants = {
-                let descendants = self.tx_descendants.read().unwrap();
+                let descendants = self
+                    .tx_descendants
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
                 descendants
                     .get(&hash)
                     .map(|d| !d.is_empty())
@@ -699,7 +725,7 @@ impl MempoolManager {
                 .map(|(h, t)| (*h, t.clone()))
                 .collect()
         };
-        let fee_cache = self.fee_cache.read().unwrap();
+        let fee_cache = self.fee_cache.read().unwrap_or_else(|e| e.into_inner());
         for (hash, tx) in &entries {
             let size = serialize_transaction(tx).len();
             let fee_rate = fee_cache.get(hash).copied().unwrap_or(0);
@@ -731,7 +757,10 @@ impl MempoolManager {
 
             // Don't evict if it has descendants
             let has_descendants = {
-                let descendants = self.tx_descendants.read().unwrap();
+                let descendants = self
+                    .tx_descendants
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
                 descendants
                     .get(&hash)
                     .map(|d| !d.is_empty())
@@ -754,7 +783,10 @@ impl MempoolManager {
 
             // Don't evict if it has descendants
             let has_descendants = {
-                let descendants = self.tx_descendants.read().unwrap();
+                let descendants = self
+                    .tx_descendants
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
                 descendants
                     .get(&hash)
                     .map(|d| !d.is_empty())
@@ -786,7 +818,12 @@ impl MempoolManager {
     ) -> Result<bool> {
         use blvm_protocol::block::calculate_tx_id;
 
-        let rbf_config = match self.rbf_config.read().unwrap().as_ref() {
+        let rbf_config = match self
+            .rbf_config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
             Some(config) => config.clone(),
             None => {
                 // No RBF config - use default BIP125 behavior
@@ -794,7 +831,7 @@ impl MempoolManager {
                     new_tx,
                     existing_tx,
                     utxo_set,
-                    &self.mempool.read().unwrap(),
+                    &self.mempool.read().unwrap_or_else(|e| e.into_inner()),
                 )
                 .map_err(|e| anyhow::anyhow!("RBF check failed: {}", e));
             }
@@ -817,7 +854,12 @@ impl MempoolManager {
         let _new_tx_hash = calculate_tx_id(new_tx);
 
         // Check replacement count limit
-        if let Some(tracking) = self.rbf_tracking.read().unwrap().get(&existing_tx_hash) {
+        if let Some(tracking) = self
+            .rbf_tracking
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&existing_tx_hash)
+        {
             if tracking.replacement_count >= rbf_config.max_replacements_per_tx {
                 warn!(
                     "RBF replacement rejected: max replacements ({}) exceeded for tx {}",
@@ -948,8 +990,12 @@ impl MempoolManager {
         // Note: replacement_checks will re-check fee rate, but we've already validated with our multiplier
         // So we call it to verify the other BIP125 rules (dependencies, etc.)
         // However, since we've already done stricter checks, if replacement_checks passes, we're good
-        let bip125_result =
-            replacement_checks(new_tx, existing_tx, utxo_set, &self.mempool.read().unwrap())?;
+        let bip125_result = replacement_checks(
+            new_tx,
+            existing_tx,
+            utxo_set,
+            &self.mempool.read().unwrap_or_else(|e| e.into_inner()),
+        )?;
         if !bip125_result {
             // BIP125 check failed (likely new dependencies issue)
             return Ok(false);
@@ -1111,8 +1157,14 @@ impl MempoolManager {
 
     /// Update dependency graph when a transaction is added
     fn update_dependency_graph(&self, tx: &Transaction, tx_hash: &Hash) {
-        let mut dependencies = self.tx_dependencies.write().unwrap();
-        let mut descendants = self.tx_descendants.write().unwrap();
+        let mut dependencies = self
+            .tx_dependencies
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut descendants = self
+            .tx_descendants
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
 
         // Initialize empty sets for this transaction
         dependencies.entry(*tx_hash).or_default();
@@ -1306,21 +1358,21 @@ impl MempoolManager {
             // Update RBF tracking (anchor to the primary conflict).
             let primary_hash = conflicting_tx_hashes[0];
             let original_hash = {
-                let tracking = self.rbf_tracking.read().unwrap();
+                let tracking = self.rbf_tracking.read().unwrap_or_else(|e| e.into_inner());
                 tracking
                     .get(&primary_hash)
                     .map(|t| t.original_tx_hash)
                     .unwrap_or(primary_hash)
             };
             let replacement_count = {
-                let tracking = self.rbf_tracking.read().unwrap();
+                let tracking = self.rbf_tracking.read().unwrap_or_else(|e| e.into_inner());
                 tracking
                     .get(&primary_hash)
                     .map(|t| t.replacement_count + 1)
                     .unwrap_or(1)
             };
             {
-                let mut tracking = self.rbf_tracking.write().unwrap();
+                let mut tracking = self.rbf_tracking.write().unwrap_or_else(|e| e.into_inner());
                 tracking.insert(
                     tx_hash,
                     RbfTracking {
@@ -1354,7 +1406,10 @@ impl MempoolManager {
 
         // Add transaction to mempool (store full transaction)
         self.pool_lock().transactions.insert(tx_hash, tx.clone());
-        self.mempool.write().unwrap().insert(tx_hash);
+        self.mempool
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(tx_hash);
 
         // Track spent outputs
         for input in &tx.inputs {
@@ -1373,7 +1428,10 @@ impl MempoolManager {
         // Calculate and cache fee rate (will be updated when UTXO set is available)
         // For now, set to 0 - will be recalculated in get_prioritized_transactions
         let fee_rate = 0u64;
-        self.fee_cache.write().unwrap().insert(tx_hash, fee_rate);
+        self.fee_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(tx_hash, fee_rate);
         self.fee_index
             .write()
             .unwrap()
@@ -1382,7 +1440,11 @@ impl MempoolManager {
             .push(tx_hash);
 
         // Publish mempool transaction added event
-        if let Some(ref event_pub) = *self.event_publisher.read().unwrap() {
+        if let Some(ref event_pub) = *self
+            .event_publisher
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+        {
             let mempool_size = self.pool_lock().transactions.len();
             // Convert fee_rate from u64 to f64 (satoshis per vbyte)
             // Note: fee_rate is currently 0, will be updated later when UTXO set is available
@@ -1452,7 +1514,7 @@ impl MempoolManager {
         // (update_fee_index may interleave with remove_transaction — opposite lock order would deadlock).
         let mut ordered_hashes: Vec<Hash> = Vec::with_capacity(limit);
         {
-            let fee_index = self.fee_index.read().unwrap();
+            let fee_index = self.fee_index.read().unwrap_or_else(|e| e.into_inner());
             for (Reverse(_fee_rate), tx_hashes) in fee_index.iter() {
                 for tx_hash in tx_hashes {
                     ordered_hashes.push(*tx_hash);
@@ -1514,7 +1576,10 @@ impl MempoolManager {
         let current_hash = Self::calculate_utxo_set_hash(utxo_set);
 
         // Check if UTXO set changed
-        let mut last_hash = self.utxo_set_hash.write().unwrap();
+        let mut last_hash = self
+            .utxo_set_hash
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         if Some(current_hash) == *last_hash {
             // UTXO set unchanged - skip recalculation
             drop(last_hash);
@@ -1526,12 +1591,12 @@ impl MempoolManager {
         drop(last_hash);
 
         // Clear existing index (we'll rebuild it)
-        let mut fee_index = self.fee_index.write().unwrap();
+        let mut fee_index = self.fee_index.write().unwrap_or_else(|e| e.into_inner());
         fee_index.clear();
         drop(fee_index);
 
         {
-            let mut fee_cache = self.fee_cache.write().unwrap();
+            let mut fee_cache = self.fee_cache.write().unwrap_or_else(|e| e.into_inner());
             fee_cache.clear();
         }
 
@@ -1572,10 +1637,10 @@ impl MempoolManager {
             let fee_rate = if size > 0 { fee / size as u64 } else { 0 };
 
             {
-                let mut fee_cache = self.fee_cache.write().unwrap();
+                let mut fee_cache = self.fee_cache.write().unwrap_or_else(|e| e.into_inner());
                 fee_cache.insert(*tx_hash, fee_rate);
             }
-            let mut fee_index = self.fee_index.write().unwrap();
+            let mut fee_index = self.fee_index.write().unwrap_or_else(|e| e.into_inner());
             fee_index
                 .entry(Reverse(fee_rate))
                 .or_default()
@@ -1663,11 +1728,19 @@ impl MempoolManager {
             tx
         };
 
-        self.mempool.write().unwrap().remove(hash);
+        self.mempool
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(hash);
 
         // Remove from fee index
-        if let Some(fee_rate) = self.fee_cache.write().unwrap().remove(hash) {
-            let mut fee_index = self.fee_index.write().unwrap();
+        if let Some(fee_rate) = self
+            .fee_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(hash)
+        {
+            let mut fee_index = self.fee_index.write().unwrap_or_else(|e| e.into_inner());
             if let Some(tx_hashes) = fee_index.get_mut(&Reverse(fee_rate)) {
                 tx_hashes.retain(|&h| h != *hash);
                 if tx_hashes.is_empty() {
@@ -1677,15 +1750,27 @@ impl MempoolManager {
         }
 
         // Remove RBF tracking
-        self.rbf_tracking.write().unwrap().remove(hash);
+        self.rbf_tracking
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(hash);
 
         // Remove timestamp
-        self.tx_timestamps.write().unwrap().remove(hash);
+        self.tx_timestamps
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(hash);
 
         // Remove from dependency graph
         {
-            let mut dependencies = self.tx_dependencies.write().unwrap();
-            let mut descendants = self.tx_descendants.write().unwrap();
+            let mut dependencies = self
+                .tx_dependencies
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let mut descendants = self
+                .tx_descendants
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
 
             if let Some(children) = descendants.remove(hash) {
                 for child_hash in children {
@@ -1704,7 +1789,11 @@ impl MempoolManager {
             }
         }
 
-        if let Some(ref event_pub) = *self.event_publisher.read().unwrap() {
+        if let Some(ref event_pub) = *self
+            .event_publisher
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+        {
             let mempool_size = self.pool_lock().transactions.len();
             let hash_clone = *hash;
             let reason = "removed".to_string();
@@ -1722,20 +1811,39 @@ impl MempoolManager {
     /// Clear mempool
     pub fn clear(&self) {
         let (cleared_count,) = {
-            let mut pool = self.pool.lock().unwrap();
+            let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
             let n = pool.transactions.len();
             pool.transactions.clear();
             pool.spent_outputs.clear();
             (n,)
         };
-        self.mempool.write().unwrap().clear();
-        self.fee_index.write().unwrap().clear();
-        self.fee_cache.write().unwrap().clear();
-        self.rbf_tracking.write().unwrap().clear();
-        self.tx_timestamps.write().unwrap().clear();
+        self.mempool
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.fee_index
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.fee_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.rbf_tracking
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.tx_timestamps
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
 
         // Publish mempool cleared event
-        if let Some(ref event_pub) = *self.event_publisher.read().unwrap() {
+        if let Some(ref event_pub) = *self
+            .event_publisher
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+        {
             let event_pub_clone = Arc::clone(event_pub);
             let cleared_count_clone = cleared_count;
             tokio::spawn(async move {

@@ -3,6 +3,7 @@
 //! HTTP JSON-RPC server: accepts connections and routes JSON-RPC requests.
 //! Uses hyper for secure HTTP handling with proper request size limits.
 
+use crate::utils::new_request_id;
 use anyhow::Result;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -16,7 +17,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{debug, error, info, warn, Span};
-use uuid::Uuid;
 
 #[cfg(feature = "bip70-http")]
 use super::payment;
@@ -930,7 +930,7 @@ impl RpcServer {
             }
         }
 
-        let request_id = Uuid::new_v4().to_string();
+        let request_id = new_request_id();
         let request_id_short = request_id.chars().take(8).collect::<String>();
 
         let span = tracing::span!(

@@ -74,10 +74,7 @@ const IBD_EMERGENCY_EVICT_EVERY_N_BLOCKS: u64 = 8;
 const IBD_EMERGENCY_EVICT_MIN_UNPROTECTED: usize = 32_768;
 
 fn ibd_maybe_heap_trim() {
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let now_ms = crate::utils::time::current_timestamp_millis();
     loop {
         let prev = LAST_IBD_HEAP_TRIM_WALL_MS.load(Ordering::Relaxed);
         if now_ms.saturating_sub(prev) < IBD_HEAP_TRIM_MIN_INTERVAL_MS {
@@ -881,10 +878,7 @@ fn adapt_max_pending_ops_tick(
         return;
     }
     const TICK_INTERVAL_MS: u64 = 500;
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let now_ms = crate::utils::time::current_timestamp_millis();
     let last = last_adapt_ms.load(Ordering::Relaxed);
     if now_ms.saturating_sub(last) < TICK_INTERVAL_MS {
         return;
@@ -1691,10 +1685,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         let wait_ms = wait_start.elapsed().as_millis() as u64;
                         if wait_ms >= 1 {
                             let buffer_len_after = guard.0.len();
-                            let ts_ms = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_millis() as u64)
-                                .unwrap_or(0);
+                            let ts_ms = crate::utils::time::current_timestamp_millis();
                             blvm_protocol::profile_log!(
                                 "[IBD_STALL_WAIT] next_height={} duration_ms={} buffer_after={} ts_ms={}",
                                 next_validation_height, wait_ms, buffer_len_after, ts_ms
@@ -3195,10 +3186,7 @@ mod tests {
     #[test]
     fn adapt_throttle_skips_recent_calls() {
         let cap = fresh_cap(8_000_000);
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now_ms = crate::utils::time::current_timestamp_millis();
         let last = Arc::new(AtomicU64::new(now_ms));
         adapt_max_pending_ops_tick(&cap, 8_000_000, PressureLevel::Emergency, 8_000_000, &last);
         assert_eq!(cap.load(Ordering::Relaxed), 8_000_000);

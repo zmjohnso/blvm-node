@@ -1024,10 +1024,7 @@ impl ParallelIBD {
                                 _guard.disarm();
                                 #[cfg(feature = "profile")]
                                 {
-                                    let ts_ms = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_millis() as u64)
-                                        .unwrap_or(0);
+                                    let ts_ms = crate::utils::time::current_timestamp_millis();
                                     blvm_protocol::profile_log!(
                                     "[IBD_CHUNK_COMPLETE] chunk_start={} chunk_end={} peer={} blocks={} ts_ms={}",
                                     start, end, peer_id, block_count, ts_ms
@@ -1708,7 +1705,9 @@ impl ParallelIBD {
                     hdr,
                     height,
                     network_time,
-                    &blvm_protocol::version_bits::bip54_deployment_mainnet(),
+                    &blvm_protocol::version_bits::bip54_deployment_for_network(
+                        &self.config.network,
+                    ),
                 )
             } else {
                 None

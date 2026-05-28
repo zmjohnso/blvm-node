@@ -25,8 +25,7 @@ use crate::module::security::permissions::PermissionSet;
 use crate::module::traits::{ModuleContext, ModuleError, ModuleMetadata, ModuleState};
 #[cfg(feature = "wasm-modules")]
 use crate::module::wasm::{WasmModuleInstance, WasmModuleLoader};
-use crate::utils::MODULE_RELOAD_CLEANUP_DELAY;
-use uuid::Uuid;
+use crate::utils::{new_request_id, MODULE_RELOAD_CLEANUP_DELAY};
 
 /// Module manager coordinates all loaded modules
 pub struct ModuleManager {
@@ -631,7 +630,7 @@ impl ModuleManager {
         }
 
         // Create module context
-        let module_id = format!("{module_name}_{}", uuid::Uuid::new_v4());
+        let module_id = format!("{module_name}_{}", new_request_id());
         let socket_path = self
             .node_socket_path
             .as_ref()
@@ -814,7 +813,7 @@ impl ModuleManager {
         let mut modules = self.modules.lock().await;
         let module_id = modules
             .get(module_name)
-            .map(|m| format!("{}_{}", module_name, uuid::Uuid::new_v4())) // We don't store module_id, so generate one
+            .map(|_m| format!("{}_{}", module_name, new_request_id())) // We don't store module_id, so generate one
             .unwrap_or_else(|| module_name.to_string());
 
         if let Some(mut managed) = modules.remove(module_name) {

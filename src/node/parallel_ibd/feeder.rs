@@ -123,10 +123,7 @@ pub(crate) fn run_feeder_thread(
             guard.2 += est_bytes;
             #[cfg(feature = "profile")]
             if buffer_was_empty {
-                let ts_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
+                let ts_ms = crate::utils::time::current_timestamp_millis();
                 blvm_protocol::profile_log!(
                     "[IBD_FEEDER_DELIVER] height={} ts_ms={} (buffer was empty, unblocking validation)",
                     h, ts_ms

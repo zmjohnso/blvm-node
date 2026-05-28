@@ -5,11 +5,11 @@
 
 pub mod assumeutxo;
 pub mod bitcoin_core_blocks;
-pub mod bitcoin_core_detection;
 pub mod bitcoin_core_format;
 #[cfg(feature = "rocksdb")]
 pub mod bitcoin_core_migrate;
 pub mod bitcoin_core_storage;
+pub mod bitcoin_detection;
 pub mod blockstore;
 pub mod buffered_store;
 pub mod chainstate;
@@ -37,11 +37,11 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 #[cfg(feature = "rocksdb")]
-use bitcoin_core_detection::BitcoinCoreDetection;
-#[cfg(feature = "rocksdb")]
-use bitcoin_core_detection::BitcoinCoreNetwork;
-#[cfg(feature = "rocksdb")]
 use bitcoin_core_storage::BitcoinCoreStorage;
+#[cfg(feature = "rocksdb")]
+use bitcoin_detection::BitcoinCoreDetection;
+#[cfg(feature = "rocksdb")]
+use bitcoin_detection::CoreDataNetwork;
 
 /// Storage manager that coordinates all storage operations
 pub struct Storage {
@@ -54,42 +54,95 @@ pub struct Storage {
 }
 
 impl Storage {
-    /// Create a new storage instance with default backend
+    /// Create a new storage instance with explicit Bitcoin network for Core data detection.
+    ///
+    /// Pass the runtime network (mainnet / testnet / regtest) so that existing Bitcoin Core
+    /// data directories are detected for the correct network variant.  All callers that know
+    /// the network at construction time should prefer this over [`Storage::new`].
+    pub fn new_with_network<P: AsRef<Path>>(
+        data_dir: P,
+        network: blvm_protocol::types::Network,
+    ) -> Result<Self> {
+        #[cfg(feature = "rocksdb")]
+        {
+            use bitcoin_detection::CoreDataNetwork;
+            let core_network = match network {
+                blvm_protocol::types::Network::Mainnet => CoreDataNetwork::Mainnet,
+                blvm_protocol::types::Network::Testnet => CoreDataNetwork::Testnet,
+                blvm_protocol::types::Network::Regtest => CoreDataNetwork::Regtest,
+            };
+            Storage::new_inner(data_dir, core_network)
+        }
+        #[cfg(not(feature = "rocksdb"))]
+        {
+            let _ = network;
+            Storage::new(data_dir)
+        }
+    }
+
+    /// Create a new storage instance with default backend.
     ///
     /// Attempts to use the default backend (TidesDB if available, else Redb), and gracefully
     /// falls back to alternatives if the primary fails.
     ///
     /// If existing node data is detected, will use RocksDB to read it.
+    /// Defaults to [`CoreDataNetwork::Mainnet`] for Core data detection; prefer
+    /// [`Storage::new_with_network`] when the runtime network is known.
     pub fn new<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
-        // Check for existing node data first (if RocksDB is available)
         #[cfg(feature = "rocksdb")]
         {
-            use bitcoin_core_detection::BitcoinCoreNetwork;
-            use bitcoin_core_storage::BitcoinCoreStorage;
+            use bitcoin_detection::CoreDataNetwork;
+            Storage::new_inner(data_dir, CoreDataNetwork::Mainnet)
+        }
+        #[cfg(not(feature = "rocksdb"))]
+        {
+            let default = default_backend();
+            match Self::with_backend(data_dir.as_ref(), default) {
+                Ok(storage) => Ok(storage),
+                Err(e) => {
+                    if let Some(fallback_backend) = fallback_backend(default) {
+                        warn!(
+                            "Failed to initialize {:?} backend: {}. Falling back to {:?}.",
+                            default, e, fallback_backend
+                        );
+                        Self::with_backend(data_dir, fallback_backend)
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "Failed to initialize {:?} backend: {}. No fallback available.",
+                            default,
+                            e
+                        ))
+                    }
+                }
+            }
+        }
+    }
 
-            // Try to detect existing mainnet data
+    #[cfg(feature = "rocksdb")]
+    fn new_inner<P: AsRef<Path>>(
+        data_dir: P,
+        core_network: bitcoin_detection::CoreDataNetwork,
+    ) -> Result<Self> {
+        use bitcoin_core_storage::BitcoinCoreStorage;
+        {
             if let Ok(Some(backend)) =
-                BitcoinCoreStorage::detect_and_open(data_dir.as_ref(), BitcoinCoreNetwork::Mainnet)
+                BitcoinCoreStorage::detect_and_open(data_dir.as_ref(), core_network)
             {
                 if backend == DatabaseBackend::RocksDB {
                     info!("Existing node data detected, opening with RocksDB backend");
-                    // Open existing database directly and initialize storage
                     let db = Arc::from(BitcoinCoreStorage::open_bitcoin_core_database(
                         data_dir.as_ref(),
-                        BitcoinCoreNetwork::Mainnet,
+                        core_network,
                     )?);
 
-                    // Create block file reader if blocks directory exists
-                    // Use cache directory for index persistence
                     let block_reader = if let Some(core_dir) =
-                        BitcoinCoreDetection::detect_data_dir(BitcoinCoreNetwork::Mainnet)?
+                        BitcoinCoreDetection::detect_data_dir(core_network)?
                     {
                         let blocks_dir = core_dir.join("blocks");
                         if blocks_dir.exists() {
-                            // Use data_dir for index cache
                             match bitcoin_core_blocks::BitcoinCoreBlockReader::new_with_cache(
                                 &blocks_dir,
-                                BitcoinCoreNetwork::Mainnet,
+                                core_network,
                                 Some(data_dir.as_ref()),
                             ) {
                                 Ok(reader) => {

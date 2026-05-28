@@ -16,7 +16,6 @@ use hyper::{Method, Response, StatusCode};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::{debug, error};
-use uuid::Uuid;
 
 /// Handle vault REST API requests
 ///
