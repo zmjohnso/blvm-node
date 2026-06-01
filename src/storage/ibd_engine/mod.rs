@@ -36,6 +36,7 @@
 //! Phase 2 adds `SpendSession` and updates `validation_loop.rs`.
 
 pub mod database;
+pub mod export;
 pub mod index;
 pub mod memory_age;
 pub mod memory_run;
@@ -44,6 +45,7 @@ pub mod table;
 pub mod types;
 
 pub use database::UtxoDatabase;
+pub use export::run_watermark_export;
 pub use spend_session::{session_to_utxo_set, SpendSession};
 pub use types::{
     output_key_to_outpoint, outpoint_to_output_key, to_output_key, IdCodec, OutputDetail,

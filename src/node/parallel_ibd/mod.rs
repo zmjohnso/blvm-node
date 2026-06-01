@@ -1575,6 +1575,11 @@ impl ParallelIBD {
                 None
             };
 
+        // Keep a clone of the engine Arc for Phase 3 watermark export after IBD completes.
+        // The engine is also moved into ValidationParams so the dispatch thread can call
+        // SpendSession::resolve. Both arcs point to the same UtxoDatabase.
+        let utxo_engine_for_export = utxo_engine.clone();
+
         let params = validation_loop::ValidationParams {
             feeder_state: feeder_state_valid,
             ibd_store: ibd_store_v2_valid,
@@ -1659,6 +1664,38 @@ impl ParallelIBD {
                 .map_err(|e| anyhow::anyhow!("IBD UTXO mutex poisoned: {e:?}"))?
                 .clone(),
         };
+
+        // Phase 3: watermark export — scan all live UTXOs from the engine and write to
+        // the production ibd_utxos tree. Computes MuHash from the same scan (no per-op reads).
+        if let Some(ref db) = utxo_engine_for_export {
+            info!("IBD engine: running Phase 3 watermark export...");
+            match storage.open_tree("ibd_utxos") {
+                Ok(tree) => {
+                    match crate::storage::ibd_engine::run_watermark_export(
+                        db,
+                        &tree,
+                        effective_end_height as i32,
+                    ) {
+                        Ok(muhash) => {
+                            let muhash_bytes = muhash.serialize_running_state();
+                            if let Err(e) = storage
+                                .chain()
+                                .persist_ibd_utxo_flush_checkpoint(effective_end_height, &muhash_bytes)
+                            {
+                                warn!("IBD engine: failed to persist watermark checkpoint: {e:#}");
+                            } else {
+                                info!(
+                                    "IBD engine: watermark checkpoint written at height {}",
+                                    effective_end_height
+                                );
+                            }
+                        }
+                        Err(e) => warn!("IBD engine: watermark export failed: {e:#}"),
+                    }
+                }
+                Err(e) => warn!("IBD engine: failed to open ibd_utxos tree for export: {e:#}"),
+            }
+        }
 
         // Isolated validation: coordinator drained all blocks; no local reorder buffer to check.
 
