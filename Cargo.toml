@@ -107,10 +107,12 @@ dirs = "=5.0"
 # optional but that's incompatible with the published blvm-protocol API.
 smallvec = { version = "=1.15.1", features = ["serde", "const_generics"] }
 
-# Multi-consumer channel for prefetch workers
+# Multi-consumer channel for prefetch workers and ibd_engine Compacter
 crossbeam-channel = "=0.5"
-# Lower-contention mutex for IBD feeder buffer (validation + feeder hot path)
+# Lower-contention mutex for IBD feeder buffer (validation + feeder hot path) and ibd_engine snapshot pattern
 parking_lot = "=0.12"
+# Parallel query in ibd_engine MemoryRun and SpendSession key sorting (optional, enabled via `rayon` feature)
+rayon = { version = "1", optional = true }
 
 # Address encoding (BIP173/350/351) is handled by blvm-protocol (bech32 dep lives there).
 # Legacy P2PKH/P2SH (Base58Check) decoded inline in rpc/rawtx.rs using sha2.
@@ -212,8 +214,9 @@ tidesdb = ["dep:tidesdb"]
 # Process sandboxing (Unix)
 nix = ["dep:nix", "dep:libc"]
 libc = ["dep:libc"]
-# Rayon parallel iterators (enabled by production)
-rayon = []
+# Rayon parallel iterators (enabled by production).
+# `dep:rayon` is the actual crate; `rayon = []` enables parallel paths in blvm-consensus.
+rayon = ["dep:rayon"]
 # Production optimizations (parallel block validation, etc.)
 production = ["blvm-protocol/production", "dep:blvm-consensus", "rayon", "mimalloc", "libc"]
 # Profiling: IBD_PROFILE, PERF, BATCH logs. NOT for production.
