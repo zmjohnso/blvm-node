@@ -305,20 +305,19 @@ impl ParallelIBDConfig {
         }
     }
 
-    /// WAN-only multi-peer parallel download stalls IBD; keep single fastest after sort.
-    fn collapse_wan_only_download_peers(mut peers: Vec<String>) -> Vec<String> {
-        if peers.len() > 1
+    /// WAN-only multi-peer mode: returns true when all peers are WAN and there are multiple.
+    /// When true, the coordinator uses a scaled reorder buffer and work-stealing chunk assignment.
+    /// Set BLVM_IBD_WAN_SINGLE_PEER=1 to force single-peer (old behavior).
+    fn is_wan_only_multi_peer(peers: &[String]) -> bool {
+        peers.len() > 1
             && peers.iter().all(|p| {
                 p.parse::<SocketAddr>()
                     .ok()
                     .is_none_or(|a| !is_lan_peer(&a))
             })
-        {
-            if let Some(best) = peers.first().cloned() {
-                peers = vec![best];
-            }
-        }
-        peers
+            && std::env::var("BLVM_IBD_WAN_SINGLE_PEER")
+                .map(|v| v != "1" && !v.eq_ignore_ascii_case("true"))
+                .unwrap_or(true)
     }
 }
 
@@ -590,11 +589,14 @@ impl ParallelIBD {
             );
         }
 
-        // WAN-only: round-robin across multiple WAN peers stalls IBD (retry latency at chunk
-        // boundaries). Restrict download to the fastest peer without changing configured mode.
         let ibd_mode: &str = &self.config.mode;
-        filtered_peers = ParallelIBDConfig::collapse_wan_only_download_peers(filtered_peers);
-        if filtered_peers.len() == 1 {
+        let wan_multi_peer = ParallelIBDConfig::is_wan_only_multi_peer(&filtered_peers);
+        if wan_multi_peer {
+            info!(
+                "WAN multi-peer IBD: {} peers, work-stealing mode (set BLVM_IBD_WAN_SINGLE_PEER=1 to force single-peer)",
+                filtered_peers.len()
+            );
+        } else if filtered_peers.len() == 1 {
             if let Ok(addr) = filtered_peers[0].parse::<SocketAddr>() {
                 if !is_lan_peer(&addr) {
                     info!(
@@ -751,10 +753,13 @@ impl ParallelIBD {
             chunk_peers,
             Arc::clone(&validation_height),
             start_height,
+            wan_multi_peer,
         ));
         info!(
-            "IBD: sequential chunk assignment — {} chunks",
-            assigner.total_chunks()
+            "IBD: {} chunk assignment — {} chunks (work_stealing={})",
+            if wan_multi_peer { "work-stealing" } else { "sequential" },
+            assigner.total_chunks(),
+            wan_multi_peer
         );
         // Track which chunks workers are downloading (for debugging; workers push/retain)
         let workers_current_chunks: Arc<tokio::sync::Mutex<Vec<(String, u64, u64)>>> =
@@ -1126,7 +1131,21 @@ impl ParallelIBD {
         };
         let assigner_for_coord = Arc::clone(&assigner);
         let validation_height_for_coord = Arc::clone(&validation_height);
-        let coord_buffer_limit = mem_guard.buffer_limit(start_height);
+        // WAN multi-peer: scale reorder buffer so fast peers can't fill it while a slow peer is
+        // stalled. Minimum: num_peers × chunk_size × 2 (absorbs one full chunk per peer ahead).
+        // Capped at 4000 to bound peak RSS (~4GB at 1MB/block on large-RAM machines).
+        let coord_buffer_limit = {
+            let base = mem_guard.buffer_limit(start_height);
+            if wan_multi_peer {
+                let wan_min = (num_peers * self.config.chunk_size as usize * 2).min(4000);
+                base.max(wan_min)
+            } else {
+                base
+            }
+        };
+        if wan_multi_peer {
+            info!("Coordinator: WAN multi-peer reorder buffer={} blocks", coord_buffer_limit);
+        }
         let gap_fill_tx_v2_for_coord = gap_fill_tx_v2.clone();
         let prefetch_input_tx_v2_for_coord = prefetch_input_tx_v2.clone();
         let ibd_store_v2_for_coord = Arc::clone(&ibd_store_v2);
@@ -1196,11 +1215,15 @@ impl ParallelIBD {
                 });
             };
             info!("Coordinator: started, awaiting blocks from download workers");
-            // 90s: the LAN peer (Bitcoin Core) needs 40-80s to serve dense Satoshi Dice era
-            // chunks from disk (h=285k-310k). With 30s, every chunk triggered a stall+retry
-            // cycle causing ~3 retries/min and driving BPS down to 2-3. With 90s, those chunks
-            // complete naturally and IBD runs at 50-100 BPS through the dense zone.
-            const COORD_STALL_LOG_SECS: u64 = 90;
+            // Stall timeout: 90s for LAN (Bitcoin Core needs 40-80s for dense Satoshi Dice era
+            // chunks at h=285k-310k). 20s for WAN multi-peer: slow WAN peers should be abandoned
+            // faster so work-stealing reassigns the chunk to a healthier peer.
+            let coord_stall_secs: u64 = if wan_multi_peer { 20 } else { 90 };
+            let coord_stall_secs = std::env::var("BLVM_IBD_COORD_STALL_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(coord_stall_secs);
+            let coord_stall_log_secs = coord_stall_secs;
             let mut coord_buffer_full_since: Option<std::time::Instant> = None;
             #[cfg(target_os = "linux")]
             let mut coord_emergency_log = std::time::Instant::now();
@@ -1301,7 +1324,7 @@ impl ParallelIBD {
                             let now = std::time::Instant::now();
                             let stall_start = *coord_buffer_full_since.get_or_insert(now);
                             let stuck_secs = now.duration_since(stall_start).as_secs();
-                            if stuck_secs >= COORD_STALL_LOG_SECS {
+                            if stuck_secs >= coord_stall_log_secs {
                                 warn!(
                                     "Coordinator stall: buffer full ({}) but height {} missing for {}s (drained {} from rx), signalling retry",
                                     reorder_buffer.len(), next_prefetch_height, stuck_secs, gap_drained
@@ -1323,7 +1346,7 @@ impl ParallelIBD {
                     continue;
                 }
                 let recv_fut = block_rx.recv_many(&mut batch, BATCH_DRAIN_LIMIT);
-                let n = match timeout(Duration::from_secs(COORD_STALL_LOG_SECS), recv_fut).await {
+                let n = match timeout(Duration::from_secs(coord_stall_log_secs), recv_fut).await {
                     Ok(n) => n,
                     Err(_) => {
                         let next_needed = validation_height_for_coord.load(Ordering::Relaxed) + 1;
@@ -1337,7 +1360,7 @@ impl ParallelIBD {
                         let stall_height = next_prefetch_height;
                         warn!(
                             "Coordinator stall: no blocks for {}s, waiting for height {} (total_received={}, next_prefetch={}, stall_requeue={})",
-                            COORD_STALL_LOG_SECS, next_needed, total_received, next_prefetch_height, stall_height
+                            coord_stall_log_secs, next_needed, total_received, next_prefetch_height, stall_height
                         );
                         let _ = stall_tx_for_coord.send(stall_height);
                         assigner_for_coord.requeue_chunk_containing_height(stall_height);

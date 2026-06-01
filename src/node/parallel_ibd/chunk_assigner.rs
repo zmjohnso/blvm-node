@@ -104,6 +104,7 @@ pub fn create_chunks(
 pub(crate) struct ChunkAssigner {
     chunks: Vec<(u64, u64)>,
     /// Peer assigned to each chunk; same length as chunks. Worker gets chunk only if peer matches.
+    /// Ignored when `work_stealing=true` (WAN multi-peer mode).
     chunk_peers: Vec<String>,
     next_index: AtomicUsize,
     retry_queue: Mutex<VecDeque<ChunkWorkItem>>,
@@ -113,6 +114,8 @@ pub(crate) struct ChunkAssigner {
     start_height: u64,
     /// Per-peer serial: peer_id -> (start, end) of chunk in flight. At most one chunk per peer.
     in_flight_per_peer: Mutex<HashMap<String, (u64, u64)>>,
+    /// When true (WAN multi-peer), ignore peer binding: any peer worker takes any available chunk.
+    work_stealing: bool,
 }
 
 impl ChunkAssigner {
@@ -121,6 +124,7 @@ impl ChunkAssigner {
         chunk_peers: Vec<String>,
         validation_height: Arc<std::sync::atomic::AtomicU64>,
         start_height: u64,
+        work_stealing: bool,
     ) -> Self {
         assert_eq!(
             chunks.len(),
@@ -138,6 +142,7 @@ impl ChunkAssigner {
             bootstrap_complete: AtomicBool::new(bootstrap_complete),
             start_height,
             in_flight_per_peer: Mutex::new(HashMap::new()),
+            work_stealing,
         }
     }
 
@@ -202,25 +207,19 @@ impl ChunkAssigner {
 
         // Main queue — try the next sequential chunk.
         //
-        // Peer binding is RESTORED here for assigned (non-retry) chunks.
-        // Background: f684b39 removed peer binding to fix a liveness deadlock where a
-        // permanently-failed peer's assigned chunks could never be picked up. However that
-        // change caused a different regression: with "earliest-first" mode all chunks are
-        // assigned to the LAN peer, but any of the 7+ WAN peers can steal them, inserting
-        // 300-600ms WAN latency into the sequential pipeline and collapsing BPS from 10k+
-        // to ~1200.
-        //
-        // Liveness is still preserved: when the assigned peer fails, the coordinator's
-        // 30-second stall broadcast calls `requeue_chunk_containing_height`, which moves the
-        // stuck chunk into the retry queue with `exclude = Some(failed_peer)`. The retry-queue
-        // path above (lines 169-194) has NO peer binding, so any healthy peer can pick it up.
+        // Peer binding: enforced for LAN/single-peer modes so a fast LAN peer isn't displaced by
+        // slow WAN peers stealing its pre-assigned chunks. For WAN multi-peer (work_stealing=true),
+        // binding is skipped — any free peer takes the next available chunk, giving us work-stealing
+        // semantics that maximize throughput when peers have heterogeneous speeds.
         let idx = self.next_index.load(Ordering::Relaxed);
         if idx >= self.chunks.len() {
             return None;
         }
-        // Only the assigned peer may take this chunk from the main queue.
-        // (chunk_peers is always populated by create_chunks; the slice never outlives chunks.)
-        if !self.chunk_peers.is_empty() && self.chunk_peers[idx] != peer_id {
+        // Peer binding check: skip in work_stealing mode (WAN multi-peer).
+        if !self.work_stealing
+            && !self.chunk_peers.is_empty()
+            && self.chunk_peers[idx] != peer_id
+        {
             return None;
         }
         let (start, end) = self.chunks[idx];
