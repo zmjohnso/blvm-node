@@ -151,7 +151,11 @@ pub struct IbdConfig {
 }
 
 fn default_ibd_chunk_size() -> u64 {
-    16
+    // 128 blocks per request round-trip. With a single WAN peer and per-peer serial
+    // chunk assignment, each round-trip fetches exactly one chunk; raising this from 16
+    // cuts RTT overhead 8×. Memory is bounded independently by MemoryGuard::max_ahead_blocks
+    // (RAM-adaptive), so this is safe across all hardware tiers.
+    128
 }
 fn default_ibd_download_timeout() -> u64 {
     30
@@ -169,7 +173,10 @@ fn default_ibd_utxo_prefetch_lookahead() -> u64 {
     64
 }
 fn default_ibd_max_blocks_in_transit() -> usize {
-    16
+    // Must stay in sync with chunk_size default: the per-peer blocks semaphore must have
+    // at least as many permits as blocks in a chunk or workers stall mid-chunk waiting
+    // for permits that can never be freed until the chunk completes.
+    128
 }
 fn default_ibd_headers_timeout() -> u64 {
     30
@@ -181,7 +188,7 @@ fn default_ibd_headers_max_failures() -> u32 {
 impl Default for IbdConfig {
     fn default() -> Self {
         Self {
-            chunk_size: 16,
+            chunk_size: 128,
             download_timeout_secs: 30,
             mode: "parallel".to_string(),
             preferred_peers: Vec::new(),
@@ -195,7 +202,7 @@ impl Default for IbdConfig {
             prefetch_workers: None,
             prefetch_queue_size: None,
             utxo_prefetch_lookahead: 64,
-            max_blocks_in_transit_per_peer: 16,
+            max_blocks_in_transit_per_peer: 128,
             headers_timeout_secs: 30,
             headers_max_failures: 10,
         }

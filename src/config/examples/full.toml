@@ -31,11 +31,11 @@ protocol_version = "BitcoinV1"
 # prune_window_size = 144
 
 # [ibd]
-# chunk_size = 16
+# chunk_size = 128                    # blocks per request round-trip (default 128; fewer round-trips vs old 16)
+# max_blocks_in_transit_per_peer = 128  # must stay >= chunk_size; memory bounded by MemoryGuard max_ahead
 # download_timeout_secs = 30
 # mode = "parallel"
 # eviction = "fifo"
-# max_blocks_in_transit_per_peer = 16
 # headers_timeout_secs = 30
 # headers_max_failures = 10
 

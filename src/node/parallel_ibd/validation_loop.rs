@@ -1693,6 +1693,22 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         }
                     }
                     if wait.timed_out() {
+                        // Graceful shutdown: signal received while we were waiting for the
+                        // next block.  Mark the feeder as done so the dispatch while-loop
+                        // breaks with None, the existing in-flight work drains, the retire
+                        // thread flushes, and the final watermark checkpoint is persisted
+                        // before we return — identical to a normal IBD completion path.
+                        if crate::node::parallel_ibd::IBD_SHUTDOWN_REQUESTED
+                            .load(std::sync::atomic::Ordering::Acquire)
+                        {
+                            warn!(
+                                "[IBD] Graceful shutdown requested at height {} — \
+                                 draining in-flight work and flushing watermark before exit",
+                                next_validation_height
+                            );
+                            guard.1 = true; // mark feeder done; dispatch loop will see None
+                            break None;
+                        }
                         let cur_min = guard.0.min_buffered_height();
                         warn!(
                             "[IBD_STALL] Validation waiting for block {} (buffer has {} blocks, min_height={:?}) — coordinator/feeder may be blocked",

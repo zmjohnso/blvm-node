@@ -66,11 +66,19 @@ use blvm_protocol::{
 use blvm_protocol::serialization::varint::decode_varint;
 use blvm_protocol::types::{OutPoint, UTXO};
 use crossbeam_channel;
+/// Set to `true` by the process-level signal handler when SIGTERM/SIGINT is received.
+///
+/// The IBD validation loop polls this on its feeder condvar timeout (every 5 s) and, when
+/// set, marks the feeder as done so the pipeline drains cleanly and the watermark checkpoint
+/// is flushed before returning.  The main binary waits for `node.start()` to complete rather
+/// than dropping it, so the join of the validation thread and the final `persist_ibd_utxo_flush_checkpoint`
+/// call both execute before the process exits.
+pub static IBD_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 use futures::stream::{FuturesUnordered, StreamExt};
 use hex;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::{Condvar, Mutex};
 use std::thread;
@@ -148,7 +156,7 @@ impl ParallelIBDConfig {
             .and_then(|s| s.parse().ok())
             .map(|n: u64| n.clamp(16, 2000))
             .or_else(|| ibd_config.map(|c| c.chunk_size))
-            .unwrap_or(16);
+            .unwrap_or(128);
         let download_timeout_secs = std::env::var("BLVM_IBD_DOWNLOAD_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -218,7 +226,7 @@ impl ParallelIBDConfig {
             .ok()
             .and_then(|s| s.parse().ok())
             .or_else(|| ibd_config.map(|c| c.max_blocks_in_transit_per_peer))
-            .unwrap_or(16);
+            .unwrap_or(128);
         let headers_timeout = std::env::var("BLVM_IBD_HEADERS_TIMEOUT")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -1778,6 +1786,10 @@ impl ParallelIBD {
             bip54_boundary,
         );
         let owned_utxo = std::mem::take(utxo_set);
+        // Pass Some(0) so chainwork_ok=true: n_minimum_chain_work defaults to 0, so any Some
+        // value satisfies the gate. During IBD the header chain is already PoW-validated before
+        // block download begins, so skipping scripts below assume_valid_height is safe.
+        let best_header_chainwork = Some(0u128);
         let (result, new_utxo_set, tx_ids, utxo_delta) = blvm_protocol::block::connect_block_ibd(
             block,
             witnesses,
@@ -1788,6 +1800,7 @@ impl ParallelIBD {
             precomputed_tx_ids,
             block_arc,
             witnesses_arc,
+            best_header_chainwork,
         )?;
 
         *utxo_set = new_utxo_set;
@@ -2417,7 +2430,7 @@ mod tests {
     fn test_parallel_ibd_config_default() {
         let config = ParallelIBDConfig::default();
         assert!(config.num_workers > 0);
-        // chunk_size: 500 default, or BLVM_IBD_CHUNK_SIZE (16-2000) if set
+        // chunk_size: 128 default, or BLVM_IBD_CHUNK_SIZE (16-2000) if set
         assert!(
             config.chunk_size >= 16 && config.chunk_size <= 2000,
             "chunk_size={}",
@@ -2749,7 +2762,7 @@ mod tests {
     #[test]
     fn test_config_chunk_size_reasonable() {
         let config = ParallelIBDConfig::default();
-        // 16 = Core-like, 500 = default, 2000 = max (BLVM_IBD_CHUNK_SIZE override)
+        // 16 = Core-like minimum, 128 = default, 2000 = max (BLVM_IBD_CHUNK_SIZE override)
         assert!(
             config.chunk_size >= 16 && config.chunk_size <= 2000,
             "chunk_size={}",

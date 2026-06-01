@@ -145,6 +145,7 @@ fn node_hot_path_once(
         Some(&tx_ids),
         Some(Arc::clone(block_arc)),
         Some(&witnesses_arc),
+        None,
     )
     .expect("connect_block_ibd");
     let validate_ms = t_validate.elapsed().as_secs_f64() * 1000.0;
