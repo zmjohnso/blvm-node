@@ -305,8 +305,8 @@ impl ParallelIBDConfig {
         }
     }
 
-    /// WAN-only multi-peer mode: returns true only when explicitly enabled via env var.
-    /// Default is single-peer for WAN (most stable). Set BLVM_IBD_WAN_MULTI_PEER=1 to opt in.
+    /// WAN-only multi-peer mode: true when multiple WAN peers are available.
+    /// Default ON. Set BLVM_IBD_WAN_SINGLE_PEER=1 to force single-peer.
     fn is_wan_only_multi_peer(peers: &[String]) -> bool {
         let all_wan = peers.len() > 1
             && peers.iter().all(|p| {
@@ -315,16 +315,17 @@ impl ParallelIBDConfig {
                     .is_none_or(|a| !is_lan_peer(&a))
             });
         all_wan
-            && std::env::var("BLVM_IBD_WAN_MULTI_PEER")
+            && !std::env::var("BLVM_IBD_WAN_SINGLE_PEER")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false)
     }
 
-    /// WAN-only: collapse to single fastest peer unless multi-peer is explicitly enabled.
+    /// WAN-only: collapse to single fastest peer only if BLVM_IBD_WAN_SINGLE_PEER=1.
     fn collapse_wan_only_download_peers(mut peers: Vec<String>) -> Vec<String> {
         if Self::is_wan_only_multi_peer(&peers) {
-            return peers;
+            return peers; // multi-peer: no collapse
         }
+        // Single-peer forced or only one peer
         if peers.len() > 1
             && peers.iter().all(|p| {
                 p.parse::<SocketAddr>()
@@ -332,9 +333,7 @@ impl ParallelIBDConfig {
                     .is_none_or(|a| !is_lan_peer(&a))
             })
         {
-            if let Some(best) = peers.first().cloned() {
-                peers = vec![best];
-            }
+            peers.truncate(1);
         }
         peers
     }
@@ -613,14 +612,14 @@ impl ParallelIBD {
         filtered_peers = ParallelIBDConfig::collapse_wan_only_download_peers(filtered_peers);
         if wan_multi_peer {
             info!(
-                "WAN multi-peer IBD: {} peers, work-stealing mode (BLVM_IBD_WAN_MULTI_PEER=1)",
+                "WAN multi-peer IBD: {} peers, 1 worker/peer, work-stealing, peer blacklisting (set BLVM_IBD_WAN_SINGLE_PEER=1 to force single-peer)",
                 filtered_peers.len()
             );
         } else if filtered_peers.len() == 1 {
             if let Ok(addr) = filtered_peers[0].parse::<SocketAddr>() {
                 if !is_lan_peer(&addr) {
                     info!(
-                        "WAN-only IBD: single fastest peer {} for download (mode={}; set BLVM_IBD_WAN_MULTI_PEER=1 for multi-peer)",
+                        "WAN-only IBD: single fastest peer {} for download (mode={})",
                         filtered_peers[0], ibd_mode
                     );
                 }
@@ -652,16 +651,21 @@ impl ParallelIBD {
             })
             .collect();
 
-        // Matches per-peer worker_count below: (2×priority).clamp(2, 6) per peer.
+        // WAN multi-peer: 1 worker per peer (prevents thundering-herd on WAN peers that throttle).
+        // LAN / single-peer: 2–6 workers per peer weighted by priority score.
         let total_download_workers: usize = filtered_peers
             .iter()
             .map(|peer_id| {
-                let priority = scored_peers
-                    .iter()
-                    .find(|(p, _)| p == peer_id)
-                    .map(|(_, s)| *s)
-                    .unwrap_or(1.0);
-                ((2.0 * priority) as usize).clamp(2, 6)
+                if wan_multi_peer {
+                    1
+                } else {
+                    let priority = scored_peers
+                        .iter()
+                        .find(|(p, _)| p == peer_id)
+                        .map(|(_, s)| *s)
+                        .unwrap_or(1.0);
+                    ((2.0 * priority) as usize).clamp(2, 6)
+                }
             })
             .sum::<usize>()
             .max(1);
@@ -907,12 +911,16 @@ impl ParallelIBD {
                 .find(|(p, _)| p == peer_id)
                 .map(|(_, s)| *s)
                 .unwrap_or(1.0);
-            // Worker count = 2 * priority (2x for high-priority). Single number, no branching.
-            let worker_count = (2.0 * priority) as usize;
-            let worker_count = worker_count.clamp(2, 6);
+            // WAN multi-peer: 1 worker per peer so we don't hammer peers with concurrent requests.
+            // LAN / single-peer: 2–6 workers weighted by priority for pipeline depth.
+            let worker_count = if wan_multi_peer {
+                1
+            } else {
+                ((2.0 * priority) as usize).clamp(2, 6)
+            };
 
             info!(
-                "IBD: {} workers for peer {} (priority: {:.2})",
+                "IBD: {} worker(s) for peer {} (priority: {:.2})",
                 worker_count, peer_id, priority
             );
 
@@ -1090,9 +1098,14 @@ impl ParallelIBD {
                                 if num_peers_clone > 1
                                     && consecutive_failures >= MAX_CONSECUTIVE_FAILURES
                                 {
+                                    // Blacklist the peer so it gets no more chunks for 60s.
+                                    // Chunks it had in-flight are already requeued with exclude=peer.
+                                    // Other peers will steal the work via work-stealing.
+                                    let blacklist_secs = 60u64;
+                                    assigner_clone.blacklist_peer(&peer_id, std::time::Duration::from_secs(blacklist_secs));
                                     warn!(
-                                        "Peer {} exceeded max failures, stopping worker",
-                                        peer_id
+                                        "Peer {} exceeded max failures — blacklisted for {}s, stopping worker",
+                                        peer_id, blacklist_secs
                                     );
                                     break;
                                 }
@@ -1101,22 +1114,16 @@ impl ParallelIBD {
                                     && consecutive_failures >= MAX_CONSECUTIVE_FAILURES
                                 {
                                     // Single peer: wait for reconnect instead of killing the worker.
-                                    // The reconnect logic in peer_connections / background_tasks will
-                                    // re-establish the TCP session; we just need to stay alive.
                                     warn!(
                                         "Peer {} at {} consecutive failures (single-peer mode) — waiting for reconnect",
                                         peer_id, consecutive_failures
                                     );
-                                    let wait_secs = 10u64;
-                                    tokio::time::sleep(std::time::Duration::from_secs(wait_secs))
-                                        .await;
-                                    // After waiting, try to get work again — peer may be back.
-                                    // Reset failure count so we get fresh retries.
+                                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                                     consecutive_failures = 0;
                                     continue;
                                 }
 
-                                let backoff_secs = (1 << (consecutive_failures - 1).min(4)).min(16);
+                                let backoff_secs = (1u64 << (consecutive_failures - 1).min(3)).min(8);
                                 tokio::time::sleep(std::time::Duration::from_secs(backoff_secs))
                                     .await;
                             }

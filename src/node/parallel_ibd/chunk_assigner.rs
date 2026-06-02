@@ -4,6 +4,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use super::types::ChunkWorkItem;
 use super::ParallelIBDConfig;
@@ -116,6 +117,8 @@ pub(crate) struct ChunkAssigner {
     in_flight_per_peer: Mutex<HashMap<String, (u64, u64)>>,
     /// When true (WAN multi-peer), ignore peer binding: any peer worker takes any available chunk.
     work_stealing: bool,
+    /// Peer blacklist: peer_id -> blacklisted_until. Blacklisted peers get no work from get_work().
+    blacklisted_until: Mutex<HashMap<String, Instant>>,
 }
 
 impl ChunkAssigner {
@@ -143,7 +146,31 @@ impl ChunkAssigner {
             start_height,
             in_flight_per_peer: Mutex::new(HashMap::new()),
             work_stealing,
+            blacklisted_until: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Blacklist a peer for `duration`. During this window, `get_work` will not assign it chunks.
+    pub(crate) fn blacklist_peer(&self, peer_id: &str, duration: Duration) {
+        let until = Instant::now() + duration;
+        let mut bl = self.blacklisted_until.lock().unwrap();
+        let entry = bl.entry(peer_id.to_string()).or_insert(until);
+        if until > *entry {
+            *entry = until;
+        }
+        tracing::warn!("IBD: blacklisted peer {} for {}s", peer_id, duration.as_secs());
+    }
+
+    /// Returns true if the peer is currently blacklisted.
+    fn is_blacklisted(&self, peer_id: &str) -> bool {
+        let mut bl = self.blacklisted_until.lock().unwrap();
+        if let Some(until) = bl.get(peer_id) {
+            if Instant::now() < *until {
+                return true;
+            }
+            bl.remove(peer_id);
+        }
+        false
     }
 
     /// Mark bootstrap chunk (0..N) complete — enables parallel chunk assignment for start_height > 0.
@@ -164,6 +191,11 @@ impl ChunkAssigner {
 
         // Bootstrap serialization: until bootstrap chunk completes, only assign chunks with start==0
         let allow_chunk = |start: u64| bootstrap_done || start == self.start_height;
+
+        // Blacklisted peers get no work until their cooldown expires.
+        if self.is_blacklisted(peer_id) {
+            return None;
+        }
 
         // Single lock: check in-flight + find chunk + insert. Prevents duplicate assignment.
         let mut guard = self.in_flight_per_peer.lock().unwrap();
