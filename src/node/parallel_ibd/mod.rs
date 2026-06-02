@@ -305,19 +305,38 @@ impl ParallelIBDConfig {
         }
     }
 
-    /// WAN-only multi-peer mode: returns true when all peers are WAN and there are multiple.
-    /// When true, the coordinator uses a scaled reorder buffer and work-stealing chunk assignment.
-    /// Set BLVM_IBD_WAN_SINGLE_PEER=1 to force single-peer (old behavior).
+    /// WAN-only multi-peer mode: returns true only when explicitly enabled via env var.
+    /// Default is single-peer for WAN (most stable). Set BLVM_IBD_WAN_MULTI_PEER=1 to opt in.
     fn is_wan_only_multi_peer(peers: &[String]) -> bool {
-        peers.len() > 1
+        let all_wan = peers.len() > 1
+            && peers.iter().all(|p| {
+                p.parse::<SocketAddr>()
+                    .ok()
+                    .is_none_or(|a| !is_lan_peer(&a))
+            });
+        all_wan
+            && std::env::var("BLVM_IBD_WAN_MULTI_PEER")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+    }
+
+    /// WAN-only: collapse to single fastest peer unless multi-peer is explicitly enabled.
+    fn collapse_wan_only_download_peers(mut peers: Vec<String>) -> Vec<String> {
+        if Self::is_wan_only_multi_peer(&peers) {
+            return peers;
+        }
+        if peers.len() > 1
             && peers.iter().all(|p| {
                 p.parse::<SocketAddr>()
                     .ok()
                     .is_none_or(|a| !is_lan_peer(&a))
             })
-            && std::env::var("BLVM_IBD_WAN_SINGLE_PEER")
-                .map(|v| v != "1" && !v.eq_ignore_ascii_case("true"))
-                .unwrap_or(true)
+        {
+            if let Some(best) = peers.first().cloned() {
+                peers = vec![best];
+            }
+        }
+        peers
     }
 }
 
@@ -591,16 +610,17 @@ impl ParallelIBD {
 
         let ibd_mode: &str = &self.config.mode;
         let wan_multi_peer = ParallelIBDConfig::is_wan_only_multi_peer(&filtered_peers);
+        filtered_peers = ParallelIBDConfig::collapse_wan_only_download_peers(filtered_peers);
         if wan_multi_peer {
             info!(
-                "WAN multi-peer IBD: {} peers, work-stealing mode (set BLVM_IBD_WAN_SINGLE_PEER=1 to force single-peer)",
+                "WAN multi-peer IBD: {} peers, work-stealing mode (BLVM_IBD_WAN_MULTI_PEER=1)",
                 filtered_peers.len()
             );
         } else if filtered_peers.len() == 1 {
             if let Ok(addr) = filtered_peers[0].parse::<SocketAddr>() {
                 if !is_lan_peer(&addr) {
                     info!(
-                        "WAN-only IBD: single fastest peer {} for download (mode={}; set BLVM_IBD_PEERS to override)",
+                        "WAN-only IBD: single fastest peer {} for download (mode={}; set BLVM_IBD_WAN_MULTI_PEER=1 for multi-peer)",
                         filtered_peers[0], ibd_mode
                     );
                 }
