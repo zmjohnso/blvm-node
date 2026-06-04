@@ -26,9 +26,9 @@ use anyhow::Result;
 use blvm_protocol::types::UTXO;
 use tracing::{info, warn};
 
-#[allow(unused_imports)]
+#[cfg(target_os = "linux")]
 use libc;
-#[allow(unused_imports)]
+#[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
 use libmimalloc_sys;
 
 /// Number of UTXOs processed per batch (table write + channel send).
@@ -157,10 +157,11 @@ pub fn seed_from_ibd_utxos(
     db.flush_table_tail()?;
 
     // Explicitly return freed pages to the OS before validation starts.
-    #[cfg(feature = "mimalloc")]
+    #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
     unsafe {
         libmimalloc_sys::mi_collect(true);
     }
+    #[cfg(target_os = "linux")]
     unsafe {
         libc::malloc_trim(0);
     }

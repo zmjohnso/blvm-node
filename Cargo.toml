@@ -145,10 +145,13 @@ dashmap = "=6.0"
 # resolve them when default features enable `sysinfo` / `governance` (they are not Unix-only).
 sysinfo = { version = "=0.30", optional = true }
 reqwest = { version = "=0.12", optional = true, features = ["json"] }
-io-uring = "0.7"
 
 # Memory allocator optimization
 # Disabled for Windows cross-compilation (mimalloc linking issues with MinGW)
+[target.'cfg(target_os = "linux")'.dependencies]
+# IBD engine batch reads (table.rs); code is cfg(linux) with pread64 fallback elsewhere.
+io-uring = "0.7"
+
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 mimalloc = { version = "=0.1", default-features = false, optional = true }
 libmimalloc-sys = { version = "=0.1", features = ["extended"], optional = true }

@@ -20,11 +20,11 @@
 //! 3. `pread64` of the bucket from disk — lock-free, parallel-safe.
 //! 4. Binary search + scan within the bucket bytes.
 
+use super::file_io;
 use super::memory_run::{BloomFilter, Directory};
 use super::types::{OutputId, OutputKV, OUTPUT_ID_DELETED};
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write as _};
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -110,7 +110,7 @@ impl DiskSegment {
         let byte_count = count * OutputKV::SIZE;
 
         let mut raw = vec![0u8; byte_count];
-        self.file.read_at(&mut raw, byte_offset)?;
+        file_io::read_at(&self.file, &mut raw, byte_offset)?;
 
         // Safety: OutputKV is repr(C). The bytes were written as valid OutputKV values.
         // `read_at` fills exactly `byte_count` bytes. Alignment: Vec<u8> may not align to 8;
@@ -194,7 +194,7 @@ impl DiskSegment {
         let mut file_offset = HEADER_SIZE;
         let mut buf_offset: usize = 0;
         while buf_offset < byte_count {
-            let n = self.file.read_at(&mut raw[buf_offset..], file_offset)?;
+            let n = file_io::read_at(&self.file, &mut raw[buf_offset..], file_offset)?;
             if n == 0 {
                 anyhow::bail!(
                     "read_all_entries: unexpected EOF from {:?}: read {} of {} bytes",
@@ -484,7 +484,7 @@ impl SegmentReader {
         let mut foff = self.file_offset;
         while off < byte_count {
             // pread64 is capped at ~2 GiB per call; loop to handle large reads.
-            let n = self.file.read_at(&mut raw[off..], foff)?;
+            let n = file_io::read_at(&self.file, &mut raw[off..], foff)?;
             if n == 0 {
                 anyhow::bail!("SegmentReader: unexpected EOF at offset {foff}");
             }

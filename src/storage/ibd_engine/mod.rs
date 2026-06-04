@@ -39,6 +39,7 @@ pub mod database;
 pub mod disk_index;
 pub mod disk_segment;
 pub mod export;
+pub mod file_io;
 pub mod import;
 pub mod index;
 pub mod memory_age;

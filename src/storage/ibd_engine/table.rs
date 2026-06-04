@@ -15,10 +15,10 @@
 //! `(max_height_seen − mutable_window)`. The continuous background flusher
 //! eliminates the periodic stalls caused by large tail accumulation.
 
+use super::file_io;
 use super::types::{IdCodec, OutputDetail, OutputHeader, OutputId, OutputKV, OutputKey};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -458,7 +458,7 @@ fn read_disk_batch(
     let mut buf = Vec::new();
     for (e, &soff) in entries.iter().zip(stage_offs.iter()) {
         buf.resize(e.length, 0u8);
-        file.read_at(&mut buf, e.offset)?;
+        file_io::read_at(file, &mut buf, e.offset)?;
         staging[soff..soff + e.length].copy_from_slice(&buf);
     }
     Ok(())
